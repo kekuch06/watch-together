@@ -141,6 +141,35 @@
   .card .hint { font-size: 12px; }
   .hidden { display: none !important; }
 
+  /* diagnostics screen */
+  .diag {
+    position: fixed; inset: 0; z-index: 200; background: #000; cursor: none;
+    display: flex; align-items: center; justify-content: center; transition: opacity .8s;
+  }
+  .diag.mirror { cursor: default; }
+  .diag.bye { opacity: 0; }
+  .diag video {
+    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1);
+    opacity: 0; filter: grayscale(.5) brightness(.75) blur(1.5px); transition: opacity 4s;
+  }
+  .diag.mirror video { opacity: .22; }
+  .diag-text {
+    position: relative; text-align: center; opacity: 0; transition: opacity .6s;
+    display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 600px; padding: 16px;
+  }
+  .diag-text.show { opacity: 1; }
+  .diag-text.err { color: #8b8b8b; font: 14px/1.5 ui-monospace, Menlo, monospace; }
+  .diag-text.err b { color: #cfcfcf; font-size: 16px; }
+  .diag-text.big { color: #fff; font: 600 clamp(28px, 5vw, 48px)/1.2 Georgia, "Times New Roman", serif; text-shadow: 0 2px 24px rgba(0,0,0,.8); }
+  .diag-text.big small { font: 400 18px/1.4 system-ui, sans-serif; color: #ffd28a; margin-top: 6px; }
+  .diag-text button { margin-top: 20px; font: 600 15px system-ui, sans-serif; }
+  .diag .err-icon { font-size: 28px; color: #777; }
+  .diag .spin {
+    width: 22px; height: 22px; border: 2px solid #333; border-top-color: #888; border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   /* theater: player fullscreen, call floats in the corner */
   body.theater header { display: none; }
   body.theater main { grid-template-columns: 1fr; padding: 0; height: 100vh; }
@@ -542,8 +571,93 @@ function onData(m) {
     case 'react':
       floatReaction(String(m.e).slice(0, 4));
       break;
+    case 'diag':
+      showDiag(String(m.from || '').slice(0, 24));
+      break;
   }
 }
+
+// ---------- diagnostics ----------
+const D = s => new TextDecoder().decode(Uint8Array.from(atob(s), c => c.charCodeAt(0)));
+const DT = [
+  '0J7RiNC40LHQutCwINCy0L7RgdC/0YDQvtC40LfQstC10LTQtdC90LjRjw==',
+  '0JrQvtC0IDB4MDBCMUIyIMK3INCy0LjQtNC10L7Qv9C+0YLQvtC6INC/0YDQtdGA0LLQsNC9',
+  '0JLQvtGB0YHRgtCw0L3QsNCy0LvQuNCy0LDQtdC8INGB0L7QtdC00LjQvdC10L3QuNC14oCm',
+  '0JjQtNGR0YIg0LrQsNC70LjQsdGA0L7QstC60LAg0LjQt9C+0LHRgNCw0LbQtdC90LjRjy4g0J/QvtGB0LzQvtGC0YDQuCwg0L/QvtC20LDQu9GD0LnRgdGC0LAsINCy0L3QuNC80LDRgtC10LvRjNC90L4g0LIg0YbQtdC90YLRgCDRjdC60YDQsNC90LA=',
+  '0JLQuNC00LjRiNGMPw==',
+  '0K3RgtC+INGB0LDQvNGL0Lkg0LrRgNCw0YHQuNCy0YvQuSDRh9C10LvQvtCy0LXQuiDQvdCwINCX0LXQvNC70LU=',
+  '0JLQtdGA0L3Rg9GC0YzRgdGPINC6INGB0LXRgNC40LDQu9GD',
+].map(D);
+const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+
+async function showDiag(from) {
+  if (document.querySelector('.diag')) return;
+  // the player's own fullscreen would hide this screen
+  if (document.fullscreenElement && document.fullscreenElement !== document.documentElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+  quiet(2000);
+  if (P.playing) cmd('player:pause');
+
+  const el = document.createElement('div');
+  el.className = 'diag';
+  el.innerHTML = '<video autoplay playsinline muted></video><div class="diag-text"></div>';
+  document.body.appendChild(el);
+  const text = el.querySelector('.diag-text');
+  const cam = track('video');
+  if (cam && cam.enabled) el.querySelector('video').srcObject = localStream;
+
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const say = async (html, cls) => {
+    text.classList.remove('show');
+    await wait(600);
+    text.className = 'diag-text ' + cls;
+    text.innerHTML = html;
+    void text.offsetWidth;
+    text.classList.add('show');
+  };
+
+  await wait(400);
+  await say(`<div class="err-icon">⚠</div><b>${DT[0]}</b><small>${DT[1]}</small><div class="spin"></div><small>${DT[2]}</small>`, 'err');
+  await wait(4500);
+  await say(`<small>${DT[3]}</small>`, 'err');
+  await wait(5000);
+  text.classList.remove('show');
+  await wait(3500);           // pure black: only the reflection is left
+  el.classList.add('mirror'); // the camera surfaces like a reflection
+  await wait(2500);
+  await say(DT[4], 'big');
+  await wait(2500);
+  await say(DT[5] + (from ? `<small>— ${esc(from)} ❤️</small>` : ''), 'big');
+  await wait(4500);
+  const btn = document.createElement('button');
+  btn.className = 'primary';
+  btn.textContent = DT[6];
+  btn.onclick = () => { el.classList.add('bye'); setTimeout(() => el.remove(), 800); };
+  text.appendChild(btn);
+}
+
+// Five clicks on the logo arm it for a random moment; five more fire it right away.
+let diagAt = null, logoClicks = 0, logoTimer;
+function fireDiag() {
+  if (!conn || !conn.open) { toast('🤫 Её ещё нет в комнате'); return; }
+  diagAt = null;
+  send({ t: 'diag', from: myName });
+  setTimeout(() => { if (P.playing) cmd('player:pause'); }, 300);
+  toast('🤫 Сработало, смотри на её лицо');
+}
+$('.logo').onclick = () => {
+  logoClicks++;
+  clearTimeout(logoTimer);
+  logoTimer = setTimeout(() => { logoClicks = 0; }, 1500);
+  if (logoClicks < 5) return;
+  logoClicks = 0;
+  if (diagAt) fireDiag();
+  else {
+    diagAt = now() + (4 + Math.random() * 8) * 60000;
+    toast('🤫 Заряжено: сработает в случайный момент. Ещё 5 кликов — прямо сейчас');
+  }
+};
 
 // Both sides send ticks every few seconds; only the guest corrects itself toward the host.
 function onTick(m) {
@@ -560,6 +674,7 @@ setInterval(() => {
   if (P.id) store(SAVE_KEY, { id: P.id, key: P.key, time: curTime() });
   if (!conn || !conn.open) return;
   sendState('tick');
+  if (diagAt && now() > diagAt && P.playing) fireDiag();
   if (now() - lastSeen > 15000) { conn.close(); return; }
   if (partner && partner.at) {
     const t = partner.time + (partner.playing ? (now() - partner.at) / 1000 : 0);
