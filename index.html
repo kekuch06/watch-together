@@ -89,6 +89,7 @@
     overflow: hidden; border: 1px solid var(--line);
   }
   .remote video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .remote iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; z-index: 2; background: var(--panel); }
   .placeholder {
     position: absolute; inset: 0; display: flex; flex-direction: column; gap: 6px;
     align-items: center; justify-content: center; color: var(--muted); text-align: center; padding: 12px;
@@ -513,7 +514,41 @@ function toggleTrack(kind) {
   if (!t) { toast(kind === 'video' ? 'Камера не подключена' : 'Микрофон не подключен'); return; }
   t.enabled = !t.enabled;
   refreshMediaButtons();
+  syncNinja();
   if (kind === 'video') send({ t: 'cam', on: t.enabled });
+}
+
+// When the direct link doesn't get through (a VPN, a strict network), the call moves to VDO.Ninja,
+// a free video chat with its own relay servers, embedded in the call panel. Each side switches on
+// its own, since both see the same failure; our mic and camera buttons drive it through postMessage.
+let ninja = null;
+function startNinja() {
+  if (ninja) return;
+  if (call) { call.close(); call = null; }
+  const mic = track('audio'), cam = track('video');
+  const q = new URLSearchParams({ room: 'smotrimvmeste' + room.replace(/\W/g, ''), label: myName || 'Гость', password: 'false' });
+  ninja = document.createElement('iframe');
+  ninja.allow = 'camera; microphone; autoplay; fullscreen';
+  ninja.src = 'https://vdo.ninja/?' + q + '&webcam&autostart&cleanoutput' +
+    '&videodevice=' + (cam ? 1 : 0) + '&audiodevice=' + (mic ? 1 : 0);
+  ninja.onload = () => { syncNinja(); setTimeout(syncNinja, 4000); };
+  $('.remote').appendChild(ninja);
+  $('#localBox').classList.add('hidden');
+  addMessage('Видео идёт через запасной сервис, напрямую не пробилось', 'sys');
+}
+function stopNinja() {
+  if (!ninja) return;
+  ninja.remove();
+  ninja = null;
+  refreshMediaButtons();
+}
+function syncNinja() {
+  if (!ninja || !ninja.contentWindow) return;
+  const mic = track('audio'), cam = track('video'), post = m => ninja.contentWindow.postMessage(m, '*');
+  if (mic) post({ mic: mic.enabled });
+  if (cam) post({ camera: cam.enabled });
+  post({ volume: +$('#voiceVol').value });
+  $('#localBox').classList.add('hidden');
 }
 
 // ---------- peer ----------
@@ -569,6 +604,7 @@ function dropPartner() {
   const c = conn, had = partner;
   conn = null; relayTo = null; partner = null;
   if (c) c.close();
+  stopNinja();
   if (call) { call.close(); call = null; }
   showRemote(null);
   if (had) addMessage(who() + ' вышел(а) из комнаты', 'sys');
@@ -666,7 +702,7 @@ function startCall() {
 }
 function bindCall(c) {
   call = c;
-  c.on('stream', s => { if (call === c) showRemote(s); });
+  c.on('stream', s => { if (call === c && !ninja) showRemote(s); });
   c.on('close', () => { if (call === c) { call = null; showRemote(null); } });
 }
 function showRemote(stream) {
@@ -680,7 +716,7 @@ function updateRemotePlaceholder() {
   $('#remotePlaceholder').classList.toggle('hidden', !!hasVideo);
   $('#remoteAvatar').textContent = partner ? (who()[0] || '?').toUpperCase() : '?';
   $('#remoteNote').textContent = !partner ? 'Ждём второго человека' : partner.cam === false ? who() + ' без камеры' :
-    !direct() && now() - linkedAt > 20000 ? 'Видео не пробилось через вашу сеть 😕 Сериал и чат работают' : 'Соединяю видео…';
+    !direct() && now() - linkedAt > 20000 ? 'Напрямую видео не пробилось, включаю запасное…' : 'Соединяю видео…';
   $('#remoteTag').textContent = who();
   $('#remoteTag').classList.toggle('hidden', !partner);
 }
@@ -745,7 +781,7 @@ function onData(m) {
       toast(who() + ' отправляет видео своей реакции 🎥');
       break;
     case 'recPart':
-      if (incoming && m.id === incoming.id && !incoming.parts[m.i]) { incoming.parts[m.i] = m.data; incoming.got++; }
+      if (incoming && m.id === incoming.id && !incoming.parts[m.i]) { incoming.parts[m.i] = m.b64 ? fromBase64(m.b64) : m.data; incoming.got++; }
       break;
     case 'recEnd':
       if (incoming && m.id === incoming.id && incoming.got === incoming.n) showRecording(new Blob(incoming.parts, { type: incoming.type }));
@@ -845,19 +881,31 @@ function downloadBlob(blob, name) {
   a.click();
   a.remove();
 }
+// Over the server path it goes as small base64 pieces: the server cuts off messages much over 16 KB.
 async function sendRecording(blob, onProgress) {
-  const buf = await blob.arrayBuffer();
-  const size = 64 * 1024, n = Math.ceil(buf.byteLength / size), id = Date.now();
+  const buf = await blob.arrayBuffer(), viaServer = !direct();
+  const size = viaServer ? 9 * 1024 : 64 * 1024, n = Math.ceil(buf.byteLength / size), id = Date.now();
   send({ t: 'recStart', id, n, type: blob.type });
   for (let i = 0; i < n; i++) {
     while (conn && conn.dataChannel && conn.dataChannel.bufferedAmount > (1 << 20)) {
       await new Promise(r => setTimeout(r, 50));
     }
-    send({ t: 'recPart', id, i, data: buf.slice(i * size, (i + 1) * size) });
+    const part = buf.slice(i * size, (i + 1) * size);
+    if (viaServer) {
+      send({ t: 'recPart', id, i, b64: toBase64(part) });
+      await new Promise(r => setTimeout(r, 30));
+    } else send({ t: 'recPart', id, i, data: part });
     onProgress((i + 1) / n);
   }
   send({ t: 'recEnd', id });
 }
+function toBase64(buf) {
+  let s = '';
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i += 4096) s += String.fromCharCode(...bytes.subarray(i, i + 4096));
+  return btoa(s);
+}
+const fromBase64 = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
 // His side: the received video lands in the chat with a preview and a download link.
 let incoming = null;
 function showRecording(blob) {
@@ -1018,7 +1066,7 @@ async function showDiag(from) {
       b.onclick = fn;
       choice.appendChild(b);
     };
-    if (conn && conn.open) add('Отправить ' + (from ? dative(from) : 'ему') + ' ❤️', 'primary', async () => {
+    if (linked()) add('Отправить ' + (from ? dative(from) : 'ему') + ' ❤️', 'primary', async () => {
       choice.innerHTML = '<small>Отправляю… 0%</small>';
       await sendRecording(blob, p => { choice.innerHTML = `<small>Отправляю… ${Math.round(p * 100)}%</small>`; });
       choice.innerHTML = '<small>Отправлено ❤️</small>';
@@ -1092,6 +1140,7 @@ setInterval(() => {
   if (!linked()) return;
   sendState('tick');
   updateRemotePlaceholder();
+  if (!direct() && partner && now() - linkedAt > 12000) startNinja();
   if (!TEST && eggsOn && partner && P.playing && ['', 'songDone'].includes(stage()) &&
       (watchedTogether += 3) >= nextAt) fireNext();
   if (now() - lastSeen > 15000) { dropPartner(); return; }
@@ -1106,7 +1155,7 @@ setInterval(() => {
 // ---------- controls ----------
 $('#micBtn').onclick = () => toggleTrack('audio');
 $('#camBtn').onclick = () => toggleTrack('video');
-$('#voiceVol').oninput = e => { $('#remoteVideo').volume = +e.target.value; };
+$('#voiceVol').oninput = e => { $('#remoteVideo').volume = +e.target.value; syncNinja(); };
 
 $('#nextBtn').onclick = nextEpisode;
 $('#nextNowBtn').onclick = () => { cancelNextUp(); nextEpisode(); };
