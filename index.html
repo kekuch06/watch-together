@@ -526,7 +526,8 @@ function toggleTrack(kind) {
 // a network won't let them meet.
 const BROKER = 'wss://broker.emqx.io:8084/mqtt';
 const ME = Math.random().toString(36).slice(2, 10);
-const JOINED = Date.now(); // the earlier arrival is the host, whose player the other one follows
+const JOINED = Date.now();
+// The host's player is the one the other follows: the room's creator (Ваня), else the earlier arrival.
 let mq = null, topic = '', key = null, role = null, partner = null, partnerId = null, lastSeen = 0, linkedAt = 0;
 const linked = () => !!partnerId;
 
@@ -580,7 +581,7 @@ function send(m, qos) {
 function sendState(t) {
   send({ t, id: P.id, key: P.key, time: curTime(), playing: P.playing }, t === 'tick' ? 0 : 1);
 }
-const announce = (re = false) => publish({ t: 'here', since: JOINED, re });
+const announce = (re = false) => publish({ t: 'here', since: JOINED, owner: IS_OWNER, re });
 
 async function start() {
   setStatus('Подключаюсь…');
@@ -608,7 +609,8 @@ function onEnvelope(m) {
     if (m.src !== partnerId) {
       if (partnerId) dropPartner(true);
       partnerId = m.src;
-      role = JOINED < m.since || (JOINED === m.since && ME < m.src) ? 'host' : 'guest';
+      role = IS_OWNER !== !!m.owner ? (IS_OWNER ? 'host' : 'guest') :
+        JOINED < m.since || (JOINED === m.since && ME < m.src) ? 'host' : 'guest';
       onLinked();
     } else if (!m.re) onLinked(); // they lost us and are calling out again
     if (!m.re) announce(true);
