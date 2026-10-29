@@ -173,14 +173,23 @@
   .diag-foot.show { opacity: 1; }
   .diag.camera { cursor: default; }
   .diag.camera video { opacity: 1; filter: none; transition: opacity 1.5s; }
-  .song-pill {
-    position: fixed; left: 50%; top: 72px; z-index: 60; transform: translateX(-50%);
-    background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 10px 20px;
-    color: #ffd28a; font-size: 22px; letter-spacing: 4px; transition: opacity .6s;
-    box-shadow: 0 8px 30px rgba(0,0,0,.5); animation: notePulse 1.2s ease-in-out infinite;
+  .diag-foot small { max-width: 520px; text-align: center; padding: 0 16px; }
+  .diag.consent svg, .diag.consent .diag-label, .diag.consent .diag-text { opacity: 0; transition: opacity .5s; }
+  .diag-choice { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+
+  /* sound calibration */
+  .calib {
+    position: fixed; inset: 0; z-index: 150; background: rgba(8,7,10,.88); backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center; padding: 16px; transition: opacity .6s;
   }
-  .song-pill.bye { opacity: 0; }
-  @keyframes notePulse { 50% { transform: translateX(-50%) translateY(-6px); } }
+  .calib.bye { opacity: 0; }
+  .calib-card { max-width: 380px; text-align: center; align-items: center; }
+  .calib-notes { color: #ffd28a; font-size: 38px; letter-spacing: 8px; animation: notePulse 1.2s ease-in-out infinite; }
+  @keyframes notePulse { 50% { transform: translateY(-6px); opacity: .6; } }
+
+  .msg.rec { display: flex; flex-direction: column; gap: 6px; }
+  .msg.rec video { width: 100%; border-radius: 8px; background: #000; }
+  .msg.rec a { color: var(--accent); }
   .diag-foot small { color: #ffd28a; font-size: 18px; text-shadow: 0 2px 10px rgba(0,0,0,.8); }
   .diag-text {
     position: relative; text-align: center; opacity: 0; transition: opacity .6s;
@@ -582,7 +591,7 @@ function onData(m) {
       addMessage(who() + ' в комнате', 'sys');
       toast(who() + ' подключился(лась) 👋');
       updateRemotePlaceholder();
-      if (TEST && eggsOn) setTimeout(() => fireDiag(true), 3000);
+      if (TEST && eggsOn) setTimeout(fireNext, 3000);
       break;
     case 'cam':
       if (partner) partner.cam = m.on;
@@ -612,11 +621,22 @@ function onData(m) {
     case 'diag':
       showDiag(String(m.from || '').slice(0, 24));
       break;
-    case 'diagClosed':
-      scheduleSong();
-      break;
     case 'song':
       playSongNow();
+      break;
+    case 'songDone':
+      onSongDone();
+      break;
+    case 'recStart':
+      incoming = { id: m.id, n: m.n, type: m.type, parts: [], got: 0 };
+      toast(who() + ' отправляет видео своей реакции 🎥');
+      break;
+    case 'recPart':
+      if (incoming && m.id === incoming.id && !incoming.parts[m.i]) { incoming.parts[m.i] = m.data; incoming.got++; }
+      break;
+    case 'recEnd':
+      if (incoming && m.id === incoming.id && incoming.got === incoming.n) showRecording(new Blob(incoming.parts, { type: incoming.type }));
+      incoming = null;
       break;
   }
 }
@@ -635,7 +655,7 @@ const DT = [
 ].map(D);
 
 // A 20-second clip (already faded out at the end), loaded ahead so the click can start it.
-const SONG = { src: 'chime.mp3', volume: 0.8 };
+const SONG = { src: 'chime.mp3', volume: 1 };
 function prepareSong() {
   const audio = new Audio(SONG.src);
   audio.preload = 'auto';
@@ -653,22 +673,104 @@ function prepareSong() {
   return song;
 }
 
-// Her side: the track arrives later on its own; the show pauses for both while it plays.
-let herSong = null;
+// Her side: "sound calibration" asks for full volume, then plays the track; the show pauses
+// for both meanwhile and resumes after.
 async function playSongNow() {
-  if (document.querySelector('.song-pill')) return;
-  const song = herSong || prepareSong();
-  herSong = null;
+  if (document.querySelector('.calib')) return;
+  if (document.fullscreenElement && document.fullscreenElement !== document.documentElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+  const song = prepareSong();
   const wasPlaying = P.playing;
   if (wasPlaying) cmd('player:pause');
-  const pill = document.createElement('div');
-  pill.className = 'song-pill';
-  pill.textContent = '♪ ♫ ♪ ❤️';
-  document.body.appendChild(pill);
+  const el = document.createElement('div');
+  el.className = 'calib';
+  el.innerHTML = `<div class="card calib-card">
+    <h1>✋ Стоп!</h1>
+    <p>Нужно откалибровать звук. Сделай, пожалуйста, громкость на максимум 🔊 и нажми «Готово».</p>
+    <button class="primary">Готово</button></div>`;
+  document.body.appendChild(el);
+  await new Promise(r => { el.querySelector('button').onclick = r; });
+  el.querySelector('.calib-card').innerHTML = '<div class="calib-notes">♪ ♫ ♪</div><p>Калибровка звука…</p>';
   await song.play();
-  pill.classList.add('bye');
-  setTimeout(() => pill.remove(), 700);
+  el.classList.add('bye');
+  setTimeout(() => el.remove(), 700);
+  send({ t: 'songDone' });
   if (wasPlaying) cmd('player:play');
+}
+
+// ---------- reaction recording ----------
+// Recorded only in her browser while the compliment plays; at the end she decides whether
+// to send it, keep it or delete it.
+function startRecording(camStream) {
+  if (!camStream || !window.MediaRecorder) return null;
+  const tracks = [...camStream.getVideoTracks()];
+  const mic = track('audio');
+  if (mic) tracks.push(mic);
+  const type = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm']
+    .find(t => MediaRecorder.isTypeSupported(t));
+  if (!type) return null;
+  let rec;
+  try { rec = new MediaRecorder(new MediaStream(tracks), { mimeType: type, videoBitsPerSecond: 1500000 }); }
+  catch { return null; }
+  const chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  rec.start(1000);
+  return {
+    stop: () => new Promise(resolve => {
+      rec.onstop = () => resolve(new Blob(chunks, { type: type.split(';')[0] }));
+      rec.stop();
+    }),
+  };
+}
+const recName = type => 'reakciya-' + new Date().toISOString().slice(0, 10) + (type.includes('mp4') ? '.mp4' : '.webm');
+function downloadBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+async function sendRecording(blob, onProgress) {
+  const buf = await blob.arrayBuffer();
+  const size = 64 * 1024, n = Math.ceil(buf.byteLength / size), id = Date.now();
+  send({ t: 'recStart', id, n, type: blob.type });
+  for (let i = 0; i < n; i++) {
+    while (conn && conn.dataChannel && conn.dataChannel.bufferedAmount > (1 << 20)) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    send({ t: 'recPart', id, i, data: buf.slice(i * size, (i + 1) * size) });
+    onProgress((i + 1) / n);
+  }
+  send({ t: 'recEnd', id });
+}
+// His side: the received video lands in the chat with a preview and a download link.
+let incoming = null;
+function showRecording(blob) {
+  const url = URL.createObjectURL(blob);
+  const el = document.createElement('div');
+  el.className = 'msg them rec';
+  el.innerHTML = `<div>🎥 Реакция: ${esc(who())}</div><video controls playsinline src="${url}"></video><a download="${recName(blob.type)}" href="${url}">⬇ Скачать видео</a>`;
+  const box = $('#messages');
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+  toast('🎥 ' + who() + ' прислала видео реакции, оно в чате');
+}
+
+// Her camera for the compliment: the call's one if it's on; if she wanted one but it never
+// started, ask the browser once more. A camera she unticked or switched off stays off.
+let wantedCam = false;
+async function camForDiag() {
+  const t = track('video');
+  if (t) return t.enabled && t.readyState === 'live' ? { stream: localStream, own: false } : null;
+  if (!wantedCam) return null;
+  try {
+    const ask = navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+    const stream = await Promise.race([ask, new Promise(r => setTimeout(() => r(null), 8000))]);
+    if (!stream) { ask.then(s => s.getTracks().forEach(t => t.stop())).catch(() => {}); return null; }
+    return { stream, own: true };
+  } catch { return null; }
 }
 
 // Red marker over the reflection: a hand-drawn circle, an arrow and a caption.
@@ -719,6 +821,8 @@ function drawMark(el) {
   label.style.top = (tail.y + 12) + 'px';
   setTimeout(() => label.classList.add('show'), 2400);
 }
+// Ваня → Ване, Иван → Ивану, Андрей → Андрею: enough for a button label
+const dative = n => /[ая]$/i.test(n) ? n.slice(0, -1) + 'е' : /[йь]$/i.test(n) ? n.slice(0, -1) + 'ю' : n + 'у';
 const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
 
 async function showDiag(from) {
@@ -736,9 +840,10 @@ async function showDiag(from) {
   el.innerHTML = '<video autoplay playsinline muted></video><div class="diag-text"></div>';
   document.body.appendChild(el);
   const text = el.querySelector('.diag-text');
-  const cam = track('video');
-  if (cam && cam.enabled) el.querySelector('video').srcObject = localStream;
-  herSong = prepareSong();
+  const cam = await camForDiag();
+  const camVideo = el.querySelector('video');
+  if (cam) { camVideo.srcObject = cam.stream; camVideo.play().catch(() => {}); }
+  const rec = startRecording(cam && cam.stream);
 
   const wait = ms => new Promise(r => setTimeout(r, ms));
   const say = async (html, cls) => {
@@ -756,8 +861,7 @@ async function showDiag(from) {
   await say(`<small>${DT[3]}</small>`, 'err');
   await wait(4500);
   text.classList.remove('show');
-  const hasCam = !!(cam && cam.enabled);
-  if (hasCam) {
+  if (cam) {
     await wait(1000);
     el.classList.add('camera'); // her camera takes the whole screen
     await wait(2000);
@@ -780,10 +884,35 @@ async function showDiag(from) {
   const btn = document.createElement('button');
   btn.className = 'primary';
   btn.textContent = DT[6];
-  btn.onclick = () => {
+  const close = () => {
     el.classList.add('bye');
     setTimeout(() => el.remove(), 800);
-    send({ t: 'diagClosed' });
+  };
+  btn.onclick = async () => {
+    btn.disabled = true;
+    const blob = rec ? await rec.stop() : null;
+    if (cam && cam.own) cam.stream.getTracks().forEach(t => t.stop());
+    if (!blob || !blob.size) return close();
+    // her call: nothing leaves this browser unless she sends it
+    el.classList.add('consent');
+    foot.innerHTML = `<small>🎥 Пока шла «проверка», записалась твоя реакция. Видео есть только у тебя, решай сама:</small>
+      <div class="diag-choice"></div>`;
+    const choice = foot.querySelector('.diag-choice');
+    const add = (label, cls, fn) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      if (cls) b.className = cls;
+      b.onclick = fn;
+      choice.appendChild(b);
+    };
+    if (conn && conn.open) add('Отправить ' + (from ? dative(from) : 'ему') + ' ❤️', 'primary', async () => {
+      choice.innerHTML = '<small>Отправляю… 0%</small>';
+      await sendRecording(blob, p => { choice.innerHTML = `<small>Отправляю… ${Math.round(p * 100)}%</small>`; });
+      choice.innerHTML = '<small>Отправлено ❤️</small>';
+      setTimeout(close, 1200);
+    });
+    add('Сохранить себе', '', () => { downloadBlob(blob, recName(blob.type)); close(); });
+    add('Удалить', '', close);
   };
   foot.appendChild(btn);
   el.appendChild(foot);
@@ -791,50 +920,47 @@ async function showDiag(from) {
   foot.classList.add('show');
 }
 
-// Runs only from the device that created the room, once per session: by itself after a random
-// 4–12 minutes of watching together, or right away after five clicks on the logo.
-const DIAG_DONE = 'smotrim:diag-done';
-let diagTarget = 240 + Math.random() * 480, watchedTogether = 0, logoClicks = 0, logoTimer;
-let eggsOn = false; // the owner's lobby checkbox
-const diagPending = () => eggsOn && !sessionStore(DIAG_DONE);
-// test = a dry run (?test in the address): fires anyway and doesn't use up the real one
-function fireDiag(test = false) {
-  if (!test && !diagPending()) return;
+// Surprises, sent only from the device that created the room, each once per session:
+// first the "sound calibration" with the track after 8–12 minutes of watching together,
+// then the compliment after another 8–12 minutes. Five clicks on the logo send the next one
+// right away. A ?test run fires them within seconds and remembers nothing.
+const STAGE = 'smotrim:stage'; // '' → 'song' (sent) → 'songDone' → 'diag' (sent)
+let eggsOn = false;             // the owner's lobby checkbox
+let testStage = '', watchedTogether = 0, logoClicks = 0, logoTimer;
+const stage = () => TEST ? testStage : (sessionStore(STAGE) || '');
+const setStage = s => { if (TEST) testStage = s; else sessionStore(STAGE, s); };
+const randomWait = () => 480 + Math.random() * 240;
+let nextAt = randomWait(); // seconds of joint watching until the next surprise
+
+function fireNext() {
+  if (!eggsOn) return;
   if (!conn || !conn.open || !partner) { toast('🤫 Её ещё нет в комнате'); return; }
-  if (!test) sessionStore(DIAG_DONE, 1);
-  send({ t: 'diag', from: myName });
-  setTimeout(() => { if (P.playing) cmd('player:pause'); }, 300);
-  toast(test ? '🧪 Тест: сработало, настоящая пасхалка не потрачена' : '🤫 Сработало, смотри на её лицо');
+  const tag = TEST ? '🧪 Тест: ' : '';
+  if (stage() === '') {
+    setStage('song');
+    send({ t: 'song' });
+    toast(tag + '🎶 Калибровка звука ушла к ней');
+  } else if (stage() === 'songDone') {
+    setStage('diag');
+    send({ t: 'diag', from: myName });
+    setTimeout(() => { if (P.playing) cmd('player:pause'); }, 300);
+    toast(tag + '🤫 Комплимент ушёл, смотри на её лицо');
+  }
 }
-// The owner sends the track once per session, a random 8–12 minutes after she closes the compliment
-// (10 seconds in a ?test run).
-const SONG_AT = 'smotrim:song-at', SONG_DONE = 'smotrim:song-done';
-let testSongAt = null;
-function scheduleSong() {
-  if (!IS_OWNER) return;
-  if (TEST) { testSongAt = Date.now() + 10000; return; }
-  if (sessionStore(SONG_DONE) || sessionStore(SONG_AT)) return;
-  sessionStore(SONG_AT, Date.now() + (8 + Math.random() * 4) * 60000);
-}
-function songDue() {
-  if (!eggsOn) return false;
-  if (TEST) return !!testSongAt && Date.now() > testSongAt;
-  const at = sessionStore(SONG_AT);
-  return !!at && !sessionStore(SONG_DONE) && Date.now() > at;
-}
-function fireSong() {
-  if (TEST) testSongAt = null;
-  else sessionStore(SONG_DONE, 1);
-  send({ t: 'song' });
-  toast('🎶 Трек ушёл к ней');
+function onSongDone() {
+  if (!eggsOn || stage() !== 'song') return;
+  setStage('songDone');
+  watchedTogether = 0;
+  nextAt = randomWait();
+  if (TEST) setTimeout(fireNext, 10000);
 }
 
 $('.logo').onclick = () => {
-  if (!diagPending()) return;
+  if (!eggsOn) return;
   logoClicks++;
   clearTimeout(logoTimer);
   logoTimer = setTimeout(() => { logoClicks = 0; }, 1500);
-  if (logoClicks >= 5) { logoClicks = 0; fireDiag(); }
+  if (logoClicks >= 5) { logoClicks = 0; fireNext(); }
 };
 
 // Both sides send ticks every few seconds; only the guest corrects itself toward the host.
@@ -852,8 +978,8 @@ setInterval(() => {
   if (P.id) store(SAVE_KEY, { id: P.id, key: P.key, time: curTime() });
   if (!conn || !conn.open) return;
   sendState('tick');
-  if (diagPending() && partner && P.playing && (watchedTogether += 3) >= diagTarget) fireDiag();
-  if (partner && songDue()) fireSong();
+  if (!TEST && eggsOn && partner && P.playing && ['', 'songDone'].includes(stage()) &&
+      (watchedTogether += 3) >= nextAt) fireNext();
   if (now() - lastSeen > 15000) { conn.close(); return; }
   if (partner && partner.at) {
     const t = partner.time + (partner.playing ? (now() - partner.at) / 1000 : 0);
@@ -946,7 +1072,8 @@ $('#lobbyForm').onsubmit = async e => {
   eggsOn = IS_OWNER && $('#wantEggs').checked;
   if (IS_OWNER) store('smotrim:eggs', eggsOn);
   $('#lobby').classList.add('hidden');
-  localStream = await getMedia($('#wantCam').checked, $('#wantMic').checked);
+  wantedCam = $('#wantCam').checked;
+  localStream = await getMedia(wantedCam, $('#wantMic').checked);
   $('#localVideo').srcObject = localStream;
   refreshMediaButtons();
   const saved = store(SAVE_KEY);
