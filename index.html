@@ -222,14 +222,15 @@
 
 <div class="lobby" id="lobby">
   <form class="card" id="lobbyForm">
-    <h1>🍿 Смотрим вместе</h1>
-    <p>Сериал синхронно у обоих, видеозвонок и чат сбоку. Чтобы позвать второго человека, просто отправь ему ссылку на эту страницу.</p>
+    <h1 id="lobbyTitle">🍿 Смотрим вместе</h1>
+    <p id="lobbyText">Сериал синхронно у обоих, видеозвонок и чат сбоку. Чтобы позвать второго человека, просто отправь ему ссылку на эту страницу.</p>
     <input type="text" id="nameInput" placeholder="Как тебя зовут" maxlength="24" required>
     <div class="checks">
       <label><input type="checkbox" id="wantCam" checked> Камера</label>
       <label><input type="checkbox" id="wantMic" checked> Микрофон</label>
     </div>
-    <button class="primary" type="submit">Войти в комнату</button>
+    <button class="primary" type="submit" id="enterBtn">Войти в комнату</button>
+    <button type="button" id="notMeBtn" class="hidden">Нет, я не она</button>
     <p class="hint">Лучше сидеть в наушниках, иначе звук сериала будет попадать в микрофон.</p>
   </form>
 </div>
@@ -897,6 +898,26 @@ document.querySelectorAll('[data-r]').forEach(b => b.onclick = () => {
 
 // ---------- lobby ----------
 $('#nameInput').value = store('smotrim:name') || '';
+
+// Whoever opens someone else's room link is greeted as the expected guest.
+const GUEST_NAME = 'Сабина';
+const isGuestLink = !IS_OWNER && !DEMO && hashParams.has('r');
+if (isGuestLink) {
+  const lobbyDefaults = [$('#lobbyTitle').textContent, $('#lobbyText').textContent, $('#nameInput').value];
+  $('#lobbyTitle').textContent = '🎩 Добрый вечер. Вы ' + GUEST_NAME + '?';
+  $('#lobbyText').textContent = 'Вас уже ждут. Проходите, присаживайтесь, ваше место у экрана. Попкорн за счёт заведения 🍿';
+  $('#nameInput').value = GUEST_NAME;
+  $('#nameInput').classList.add('hidden');
+  $('#enterBtn').textContent = 'Да, это я';
+  $('#notMeBtn').classList.remove('hidden');
+  $('#notMeBtn').onclick = () => {
+    [$('#lobbyTitle').textContent, $('#lobbyText').textContent, $('#nameInput').value] = lobbyDefaults;
+    $('#nameInput').classList.remove('hidden');
+    $('#enterBtn').textContent = 'Войти в комнату';
+    $('#notMeBtn').classList.add('hidden');
+    $('#nameInput').focus();
+  };
+}
 $('#lobbyForm').onsubmit = async e => {
   e.preventDefault();
   myName = $('#nameInput').value.trim();
@@ -910,6 +931,7 @@ $('#lobbyForm').onsubmit = async e => {
   else loadVideo(DEFAULT_VIDEO.id, DEFAULT_VIDEO.key);
   // preview: plays the diagnostics locally, no room, nothing remembered
   if (DEMO) { setStatus('Предпросмотр'); setTimeout(() => showDiag(myName), 5000); return; }
+  if (isGuestLink && myName === GUEST_NAME) toast('Присаживайтесь, сейчас начнём 🍿');
   start();
 };
 </script>
