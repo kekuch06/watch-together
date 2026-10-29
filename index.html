@@ -89,8 +89,6 @@
     overflow: hidden; border: 1px solid var(--line);
   }
   .remote video { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .remote iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; z-index: 2; background: var(--panel); }
-  .ninja-out { position: absolute; left: 8px; bottom: 8px; z-index: 3; font-size: 12px; padding: 5px 10px; }
   .placeholder {
     position: absolute; inset: 0; display: flex; flex-direction: column; gap: 6px;
     align-items: center; justify-content: center; color: var(--muted); text-align: center; padding: 12px;
@@ -308,7 +306,7 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="mqtt.min.js"></script>
 <script>
 const DEFAULT_VIDEO = { id: '97833bced1df936a5e23de19a078ea5e', key: '' };
 // The Breaking Bad playlist (rutube.ru/plst/853620) in order, as [video id, label].
@@ -323,12 +321,12 @@ const DEMO = hashParams.has('demo');
 const TEST = new URLSearchParams(location.search).has('test');
 let room = hashParams.get('r');
 if (!room) {
-  room = Math.random().toString(36).slice(2, 8);
+  // long enough that nobody can guess it and find the room's topic and key
+  room = [...crypto.getRandomValues(new Uint8Array(12))].map(b => (b % 36).toString(36)).join('');
   history.replaceState(null, '', '#r=' + room);
   if (!DEMO) store('smotrim:own:' + room, 1);
 }
 const IS_OWNER = !!store('smotrim:own:' + room);
-const HOST_ID = 'smotrim-vmeste-' + room;
 const SAVE_KEY = 'smotrim:' + room;
 
 function store(key, val, storage = localStorage) {
@@ -516,243 +514,180 @@ function toggleTrack(kind) {
   if (!t) { toast(kind === 'video' ? 'Камера не подключена' : 'Микрофон не подключен'); return; }
   t.enabled = !t.enabled;
   refreshMediaButtons();
-  syncNinja();
   if (kind === 'video') send({ t: 'cam', on: t.enabled });
 }
 
-// When the direct link doesn't get through (a VPN, a strict network), the call moves to VDO.Ninja,
-// a free video chat with its own relay servers, embedded in the call panel. Each side switches on
-// its own, since both see the same failure; our mic and camera buttons drive it through postMessage.
-// On Windows a camera serves only one taker at a time, so ours is let go while VDO.Ninja runs.
-let ninja = null, ninjaOut = false;
-function ninjaSrc() {
-  const mic = track('audio'), cam = track('video');
-  const q = new URLSearchParams({ room: 'smotrimvmeste' + room.replace(/\W/g, ''), label: myName || 'Гость', password: 'false' });
-  return 'https://vdo.ninja/?' + q + '&webcam&autostart&cleanoutput' +
-    '&videodevice=' + (cam ? 1 : 0) + '&audiodevice=' + (mic ? 1 : 0);
-}
-function startNinja(quietly = false) {
-  if (ninja || ninjaOut) return;
-  if (call) { call.close(); call = null; }
-  const cam = track('video');
-  if (cam) cam.stop();
-  ninja = document.createElement('iframe');
-  ninja.allow = 'camera; microphone; autoplay; fullscreen';
-  ninja.src = ninjaSrc();
-  ninja.onload = () => { syncNinja(); setTimeout(syncNinja, 4000); };
-  $('.remote').appendChild(ninja);
-  // some browsers won't hand the camera to an embedded page; a tab of its own asks for it directly
-  const out = document.createElement('button');
-  out.className = 'ninja-out';
-  out.textContent = '↗ Звонок в отдельной вкладке';
-  out.title = 'Если в окошке «Problem with Camera»';
-  out.onclick = () => {
-    window.open(ninjaSrc(), '_blank');
-    ninjaOut = true;
-    stopNinja(true);
-    $('#remoteNote').textContent = 'Звонок открыт в отдельной вкладке';
-  };
-  ninja.out = out;
-  $('.remote').appendChild(out);
-  $('#localBox').classList.add('hidden');
-  if (!quietly) addMessage('Видео идёт через запасной сервис, напрямую не пробилось', 'sys');
-}
-function stopNinja(keepCamOff = false) {
-  if (!ninja) return;
-  ninja.remove();
-  ninja.out.remove();
-  ninja = null;
-  if (!keepCamOff) takeCamBack();
-  refreshMediaButtons();
-}
-async function takeCamBack() {
-  const t = track('video');
-  if (!t || t.readyState === 'live') return;
-  await new Promise(r => setTimeout(r, 800)); // let the iframe's capture close first
-  try {
-    const fresh = (await navigator.mediaDevices.getUserMedia({ video: CAM })).getVideoTracks()[0];
-    fresh.enabled = t.enabled;
-    localStream.removeTrack(t);
-    localStream.addTrack(fresh);
-    refreshMediaButtons();
-  } catch {}
-}
-function syncNinja() {
-  if (!ninja || !ninja.contentWindow) return;
-  const mic = track('audio'), cam = track('video'), post = m => ninja.contentWindow.postMessage(m, '*');
-  if (mic) post({ mic: mic.enabled });
-  if (cam) post({ camera: cam.enabled });
-  post({ volume: +$('#voiceVol').value });
-  $('#localBox').classList.add('hidden');
-}
+// ---------- link ----------
+// Both browsers meet in a topic on a public MQTT broker (broker.emqx.io: free, and not behind
+// Cloudflare, which Russian providers throttle, so no VPN is needed). Everything sent there is
+// AES-GCM encrypted with a key derived from the room id, which lives only in the link's #hash,
+// so the broker and anyone else listening on it see noise. Sync, chat and call setup go this way;
+// the call itself is WebRTC, straight between the two browsers, or through the TURN relay when
+// a network won't let them meet.
+const BROKER = 'wss://broker.emqx.io:8084/mqtt';
+const ME = Math.random().toString(36).slice(2, 10);
+const JOINED = Date.now(); // the earlier arrival is the host, whose player the other one follows
+let mq = null, topic = '', key = null, role = null, partner = null, partnerId = null, lastSeen = 0, linkedAt = 0;
+const linked = () => !!partnerId;
 
-// ---------- peer ----------
-let peer = null, conn = null, call = null, role = null, lastSeen = 0, partner = null, retryTimer = null;
-let relayTo = null, linkedAt = 0;
-
-// TURN relay (metered.ca, free plan) for when the two browsers can't reach each other directly,
-// e.g. behind a VPN: the call then goes through it over port 443 like ordinary web traffic.
-// The free plan has 500 MB a month, so the call's video is kept modest (see capBitrate).
+// TURN relay (metered.ca, free plan: 500 MB a month) for when the browsers can't reach each other
+// directly; it runs over port 443 like ordinary web traffic. Video is kept modest (see capBitrate).
 const TURN = ['turn:global.relay.metered.ca:80', 'turn:global.relay.metered.ca:80?transport=tcp',
   'turn:global.relay.metered.ca:443', 'turns:global.relay.metered.ca:443?transport=tcp']
   .map(urls => ({ urls, username: '737ae3d0d4f067b632f7a44d', credential: '3YivipeEg3BbBLEA' }));
-const PEER_OPTS = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, ...TURN] } };
-const direct = () => !!(conn && conn.open);
-const linked = () => direct() || !!relayTo;
+const ICE = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.relay.metered.ca:80'] }, ...TURN];
 
-// When the WebRTC link can't get through someone's network even with the TURN relay (or the
-// relay's quota runs out), sync and chat still go through the PeerJS signalling
-// server instead, dressed up as ICE candidate messages (it drops anything shaped otherwise) and
-// forwarded to the other peer as is. The video call still needs the direct link.
-const INSTANCE = Math.random().toString(36).slice(2);
-const RELAY_CONN = 'dc_watch_relay';
-function relaySend(dst, m) {
-  if (!peer || !peer.open) return;
-  peer.socket.send({ type: 'CANDIDATE', dst, payload: {
-    connectionId: RELAY_CONN, type: 'data', candidate: { candidate: '', sdpMid: '0', sdpMLineIndex: 0 }, watch: m,
-  } });
+async function roomKeys() {
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(room), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode('smotrim-vmeste'), iterations: 200000, hash: 'SHA-256' }, base, 384));
+  key = await crypto.subtle.importKey('raw', bits.slice(0, 32), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  topic = 'smotrim/' + [...bits.slice(32)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
-function listenRelay(p) {
-  p.socket.on('message', msg => {
-    if (msg.type !== 'CANDIDATE' || !msg.payload || msg.payload.connectionId !== RELAY_CONN) return;
-    // PeerJS files these away for a connection that never comes; don't let them pile up
-    if (p._lostMessages) p._lostMessages.delete(RELAY_CONN);
-    if (p === peer && msg.payload.watch) onRelay(msg.src, msg.payload.watch);
+function toBase64(buf) {
+  let s = '';
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i += 4096) s += String.fromCharCode(...bytes.subarray(i, i + 4096));
+  return btoa(s);
+}
+const fromBase64 = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+async function seal(m) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(m)));
+  const out = new Uint8Array(12 + data.byteLength);
+  out.set(iv);
+  out.set(new Uint8Array(data), 12);
+  return toBase64(out);
+}
+async function unseal(text) {
+  const bytes = fromBase64(text);
+  const data = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.slice(0, 12) }, key, bytes.slice(12));
+  return JSON.parse(new TextDecoder().decode(data));
+}
+
+// published in order, whatever each one takes to encrypt
+let outbox = Promise.resolve(), inbox = Promise.resolve();
+function publish(m, qos = 1) {
+  outbox = outbox.then(async () => {
+    if (mq && mq.connected) mq.publish(topic, await seal({ ...m, src: ME }), { qos });
+  }).catch(() => {});
+  return outbox;
+}
+function send(m, qos) {
+  if (partnerId) return publish({ ...m, dst: partnerId }, qos);
+}
+function sendState(t) {
+  send({ t, id: P.id, key: P.key, time: curTime(), playing: P.playing }, t === 'tick' ? 0 : 1);
+}
+const announce = (re = false) => publish({ t: 'here', since: JOINED, re });
+
+async function start() {
+  setStatus('Подключаюсь…');
+  await roomKeys();
+  mq = mqtt.connect(BROKER, {
+    clientId: 'sv_' + ME, keepalive: 20, reconnectPeriod: 2000, connectTimeout: 10000,
+    will: { topic, payload: await seal({ t: 'bye', src: ME }), qos: 1 },
   });
+  mq.on('connect', () => {
+    mq.subscribe(topic, { qos: 1 });
+    if (!linked()) { setStatus('Ждём второго. Отправь ссылку'); announce(); }
+    else { setStatus('На связи', 'ok'); announce(); }
+  });
+  mq.on('offline', () => setStatus('Нет связи с сервером, пробую снова…', 'bad'));
+  mq.on('message', (t, payload) => {
+    inbox = inbox.then(() => unseal(payload.toString())).then(onEnvelope).catch(() => {});
+  });
+  addEventListener('pagehide', () => { publish({ t: 'bye' }); });
 }
-function onRelay(src, m) {
-  if (m.t === 'knock') {
-    // the server keeps messages for an absent id, so skip stale knocks and our own from before a reload
-    if (role !== 'host' || m.me === INSTANCE || Math.abs(Date.now() - m.at) > 30000) return;
-    relaySend(src, { t: 'knocked' });
-    if (src === relayTo) return;
-    const already = direct() && conn.peer === src; // then the server path is only kept as a spare
-    relayTo = src;
-    if (!already) onLinked();
-  } else if (m.t === 'knocked') {
-    if (role === 'guest' && src === HOST_ID && !relayTo) { relayTo = src; if (!direct()) onLinked(); }
-  } else if (src === relayTo) onData(m);
+
+function onEnvelope(m) {
+  if (!m || m.src === ME || (m.dst && m.dst !== ME)) return;
+  if (m.t === 'here') {
+    // a newcomer (or the partner after a reload, under a new id): pair up and answer once
+    if (m.src !== partnerId) {
+      if (partnerId) dropPartner(true);
+      partnerId = m.src;
+      role = JOINED < m.since || (JOINED === m.since && ME < m.src) ? 'host' : 'guest';
+      onLinked();
+    } else if (!m.re) onLinked(); // they lost us and are calling out again
+    if (!m.re) announce(true);
+    return;
+  }
+  if (m.src !== partnerId) return;
+  if (m.t === 'bye') { dropPartner(); return; }
+  onData(m);
 }
-function knock() {
-  if (role === 'guest' && !relayTo) relaySend(HOST_ID, { t: 'knock', me: INSTANCE, at: Date.now() });
-}
+
 function onLinked() {
   lastSeen = linkedAt = now();
-  setStatus(direct() ? 'На связи' : 'На связи через сервер', 'ok');
+  setStatus('На связи', 'ok');
   send({ t: 'hello', name: myName, cam: !!(track('video') && track('video').enabled) });
   if (role === 'host') sendState('state');
-  if (role === 'guest' && !call) startCall();
+  if (role === 'guest') startCall();
 }
-function dropPartner() {
-  const c = conn, had = partner;
-  conn = null; relayTo = null; partner = null;
-  if (c) c.close();
-  stopNinja();
-  if (call) { call.close(); call = null; }
+function dropPartner(quietly = false) {
+  const had = partner;
+  partnerId = null; partner = null;
+  closeCall();
   showRemote(null);
-  if (had) addMessage(who() + ' вышел(а) из комнаты', 'sys');
+  if (had && !quietly) addMessage(who() + ' вышел(а) из комнаты', 'sys');
   $('#partnerTime').textContent = '';
-  if (role === 'guest') { setStatus('Переподключаюсь…'); retry(1500); }
-  else setStatus('Ждём второго. Отправь ссылку');
+  setStatus('Ждём второго. Отправь ссылку');
 }
 
-function retry(ms) {
-  const p = peer;
-  peer = null; relayTo = null;
-  if (p) p.destroy(); // may call back into retry through the closing connection
-  clearTimeout(retryTimer);
-  retryTimer = setTimeout(start, ms);
+// ---------- call ----------
+// The guest offers, the host answers; if the connection fails, the guest tries again.
+let pc = null, pendingIce = [], callRetry = null;
+function newPc() {
+  const p = new RTCPeerConnection({ iceServers: ICE });
+  p.onicecandidate = e => { if (e.candidate && pc === p) send({ t: 'ice', c: e.candidate.toJSON() }); };
+  p.ontrack = e => { if (pc === p) { showRemote(e.streams[0] || new MediaStream([e.track])); capBitrate(p); } };
+  p.onconnectionstatechange = () => {
+    if (pc !== p) return;
+    updateRemotePlaceholder();
+    if (p.connectionState === 'failed' && role === 'guest') {
+      clearTimeout(callRetry);
+      callRetry = setTimeout(() => { if (pc === p && linked()) startCall(); }, 4000);
+    }
+  };
+  for (const t of localStream ? localStream.getTracks() : []) p.addTrack(t, localStream);
+  if (!track('audio')) p.addTransceiver('audio', { direction: 'recvonly' });
+  if (!track('video')) p.addTransceiver('video', { direction: 'recvonly' });
+  return p;
 }
-
-// Whoever opens the room first takes the fixed host id; the second one connects to it.
-function start() {
-  role = null;
-  setStatus('Подключаюсь…');
-  const p = peer = new Peer(HOST_ID, PEER_OPTS);
-  listenRelay(p);
-  p.on('open', () => {
-    role = 'host';
-    if (!linked()) setStatus('Ждём второго. Отправь ссылку');
-  });
-  p.on('connection', c => {
-    const old = conn;
-    conn = null;
-    if (old) old.close();
-    bindConn(c);
-  });
-  p.on('call', c => {
-    if (call) call.close();
-    c.answer(localStream || undefined);
-    bindCall(c);
-  });
-  p.on('error', err => {
-    if (p !== peer) return;
-    if (err.type === 'unavailable-id') { p.destroy(); joinAsGuest(); }
-    else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
-      setStatus('Нет связи с сервером, пробую снова…', 'bad');
-      retry(3000);
-    } else console.warn(err);
-  });
-  p.on('disconnected', () => { if (p === peer && !p.destroyed) p.reconnect(); });
+function closeCall() {
+  clearTimeout(callRetry);
+  if (pc) pc.close();
+  pc = null; pendingIce = [];
 }
-
-function joinAsGuest() {
-  const p = peer = new Peer(PEER_OPTS);
-  listenRelay(p);
-  p.on('open', () => {
-    role = 'guest';
-    bindConn(p.connect(HOST_ID, { reliable: true }));
-    // after a moment, so a missing host shows up as 'peer-unavailable' first
-    setTimeout(() => { if (p === peer) knock(); }, 1500);
-    setTimeout(() => { if (p === peer) knock(); }, 6000);
-  });
-  p.on('call', c => { if (call) call.close(); c.answer(localStream || undefined); bindCall(c); });
-  p.on('error', err => {
-    if (p !== peer) return;
-    // host went away between our attempts, try to become host ourselves
-    if (err.type === 'peer-unavailable') retry(1000);
-    else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
-      setStatus('Нет связи с сервером, пробую снова…', 'bad');
-      retry(3000);
-    } else console.warn(err);
-  });
-  p.on('disconnected', () => { if (p === peer && !p.destroyed) p.reconnect(); });
+const desc = d => ({ type: d.type, sdp: d.sdp });
+async function startCall() {
+  closeCall();
+  const p = pc = newPc();
+  await p.setLocalDescription(await p.createOffer());
+  if (pc === p) send({ t: 'offer', sdp: desc(p.localDescription) });
 }
-
-function bindConn(c) {
-  conn = c;
-  c.on('open', () => {
-    if (conn !== c) return;
-    // already talking through the server: just switch over to the direct link
-    if (relayTo === c.peer) { lastSeen = now(); setStatus('На связи', 'ok'); return; }
-    relayTo = null;
-    onLinked();
-  });
-  c.on('data', onData);
-  c.on('close', () => {
-    if (conn !== c) return;
-    // the direct link failed or dropped, but the server path still works
-    if (relayTo) { conn = null; setStatus('На связи через сервер', 'ok'); return; }
-    dropPartner();
-  });
+async function onOffer(m) {
+  closeCall();
+  const p = pc = newPc();
+  await p.setRemoteDescription(m.sdp);
+  for (const c of pendingIce.splice(0)) p.addIceCandidate(c).catch(() => {});
+  await p.setLocalDescription(await p.createAnswer());
+  if (pc === p) send({ t: 'answer', sdp: desc(p.localDescription) });
 }
-
-function startCall() {
-  const c = peer.call(HOST_ID, localStream || new MediaStream(), {
-    constraints: { offerToReceiveAudio: true, offerToReceiveVideo: true },
-  });
-  if (c) bindCall(c);
+async function onAnswer(m) {
+  if (!pc || pc.signalingState !== 'have-local-offer') return;
+  await pc.setRemoteDescription(m.sdp);
+  for (const c of pendingIce.splice(0)) pc.addIceCandidate(c).catch(() => {});
 }
-function bindCall(c) {
-  call = c;
-  c.on('stream', s => { if (call === c && !ninja) { showRemote(s); capBitrate(c); } });
-  c.on('close', () => { if (call === c) { call = null; showRemote(null); } });
+function onIce(m) {
+  if (pc && pc.remoteDescription) pc.addIceCandidate(m.c).catch(() => {});
+  else pendingIce.push(m.c);
 }
 // ~350 kbit/s of video looks fine in the small call window and keeps the relay quota lasting
-function capBitrate(c) {
-  const pc = c.peerConnection;
-  if (!pc) return;
-  for (const sender of pc.getSenders()) {
+function capBitrate(p) {
+  for (const sender of p.getSenders()) {
     if (!sender.track || sender.track.kind !== 'video') continue;
     const params = sender.getParameters();
     if (!params.encodings || !params.encodings.length) params.encodings = [{}];
@@ -771,19 +706,9 @@ function updateRemotePlaceholder() {
   $('#remotePlaceholder').classList.toggle('hidden', !!hasVideo);
   $('#remoteAvatar').textContent = partner ? (who()[0] || '?').toUpperCase() : '?';
   $('#remoteNote').textContent = !partner ? 'Ждём второго человека' : partner.cam === false ? who() + ' без камеры' :
-    ninjaOut ? 'Звонок открыт в отдельной вкладке' :
-    !direct() && now() - linkedAt > 20000 ? (TURN.length ? 'Видео не пробилось через сеть 😕 Сериал и чат работают' :
-    'Напрямую видео не пробилось, включаю запасное…') : 'Соединяю видео…';
+    pc && pc.connectionState === 'failed' ? 'Видео не пробилось через сеть 😕 Сериал и чат работают' : 'Соединяю видео…';
   $('#remoteTag').textContent = who();
   $('#remoteTag').classList.toggle('hidden', !partner);
-}
-
-function send(m) {
-  if (direct()) conn.send(m);
-  else if (relayTo) relaySend(relayTo, m);
-}
-function sendState(t) {
-  send({ t, id: P.id, key: P.key, time: curTime(), playing: P.playing });
 }
 
 function onData(m) {
@@ -797,6 +722,15 @@ function onData(m) {
       toast(who() + ' подключился(лась) 👋');
       updateRemotePlaceholder();
       if (TEST && eggsOn) setTimeout(fireNext, 3000);
+      break;
+    case 'offer':
+      onOffer(m).catch(e => console.warn(e));
+      break;
+    case 'answer':
+      onAnswer(m).catch(e => console.warn(e));
+      break;
+    case 'ice':
+      onIce(m);
       break;
     case 'cam':
       if (partner) partner.cam = m.on;
@@ -838,7 +772,7 @@ function onData(m) {
       toast(who() + ' отправляет видео своей реакции 🎥');
       break;
     case 'recPart':
-      if (incoming && m.id === incoming.id && !incoming.parts[m.i]) { incoming.parts[m.i] = m.b64 ? fromBase64(m.b64) : m.data; incoming.got++; }
+      if (incoming && m.id === incoming.id && !incoming.parts[m.i]) { incoming.parts[m.i] = fromBase64(m.b64); incoming.got++; }
       break;
     case 'recEnd':
       if (incoming && m.id === incoming.id && incoming.got === incoming.n) showRecording(new Blob(incoming.parts, { type: incoming.type }));
@@ -938,31 +872,19 @@ function downloadBlob(blob, name) {
   a.click();
   a.remove();
 }
-// Over the server path it goes as small base64 pieces: the server cuts off messages much over 16 KB.
+// Goes through the broker (encrypted like everything else) in 48 KB pieces, paced so a public
+// broker doesn't drop any.
 async function sendRecording(blob, onProgress) {
-  const buf = await blob.arrayBuffer(), viaServer = !direct();
-  const size = viaServer ? 9 * 1024 : 64 * 1024, n = Math.ceil(buf.byteLength / size), id = Date.now();
-  send({ t: 'recStart', id, n, type: blob.type });
+  const buf = await blob.arrayBuffer();
+  const size = 48 * 1024, n = Math.ceil(buf.byteLength / size), id = Date.now();
+  await send({ t: 'recStart', id, n, type: blob.type });
   for (let i = 0; i < n; i++) {
-    while (conn && conn.dataChannel && conn.dataChannel.bufferedAmount > (1 << 20)) {
-      await new Promise(r => setTimeout(r, 50));
-    }
-    const part = buf.slice(i * size, (i + 1) * size);
-    if (viaServer) {
-      send({ t: 'recPart', id, i, b64: toBase64(part) });
-      await new Promise(r => setTimeout(r, 30));
-    } else send({ t: 'recPart', id, i, data: part });
+    await send({ t: 'recPart', id, i, b64: toBase64(buf.slice(i * size, (i + 1) * size)) });
+    await new Promise(r => setTimeout(r, 120));
     onProgress((i + 1) / n);
   }
-  send({ t: 'recEnd', id });
+  await send({ t: 'recEnd', id });
 }
-function toBase64(buf) {
-  let s = '';
-  const bytes = new Uint8Array(buf);
-  for (let i = 0; i < bytes.length; i += 4096) s += String.fromCharCode(...bytes.subarray(i, i + 4096));
-  return btoa(s);
-}
-const fromBase64 = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
 // His side: the received video lands in the chat with a preview and a download link.
 let incoming = null;
 function showRecording(blob) {
@@ -1059,9 +981,6 @@ async function showDiag(from) {
   el.innerHTML = '<video autoplay playsinline muted></video><div class="diag-text"></div>';
   document.body.appendChild(el);
   const text = el.querySelector('.diag-text');
-  // VDO.Ninja holds the camera; step it aside for the "calibration" and bring it back after
-  const hadNinja = !!ninja;
-  if (hadNinja) { stopNinja(true); await new Promise(r => setTimeout(r, 800)); }
   const cam = await camForDiag();
   const camVideo = el.querySelector('video');
   if (cam) { camVideo.srcObject = cam.stream; camVideo.play().catch(() => {}); }
@@ -1114,7 +1033,6 @@ async function showDiag(from) {
     btn.disabled = true;
     const blob = rec ? await rec.stop() : null;
     if (cam && cam.own) cam.stream.getTracks().forEach(t => t.stop());
-    if (hadNinja && partner && !direct()) startNinja(true);
     if (!blob || !blob.size) return close();
     // her call: nothing leaves this browser unless she sends it
     el.classList.add('consent');
@@ -1199,10 +1117,9 @@ function onTick(m) {
 
 setInterval(() => {
   if (P.id) store(SAVE_KEY, { id: P.id, key: P.key, time: curTime() });
-  if (!linked()) return;
+  if (!linked()) { if (mq && mq.connected) announce(); return; }
   sendState('tick');
   updateRemotePlaceholder();
-  if (!TURN.length && !direct() && partner && now() - linkedAt > 12000) startNinja();
   if (!TEST && eggsOn && partner && P.playing && ['', 'songDone'].includes(stage()) &&
       (watchedTogether += 3) >= nextAt) fireNext();
   if (now() - lastSeen > 15000) { dropPartner(); return; }
@@ -1217,7 +1134,7 @@ setInterval(() => {
 // ---------- controls ----------
 $('#micBtn').onclick = () => toggleTrack('audio');
 $('#camBtn').onclick = () => toggleTrack('video');
-$('#voiceVol').oninput = e => { $('#remoteVideo').volume = +e.target.value; syncNinja(); };
+$('#voiceVol').oninput = e => { $('#remoteVideo').volume = +e.target.value; };
 
 $('#nextBtn').onclick = nextEpisode;
 $('#nextNowBtn').onclick = () => { cancelNextUp(); nextEpisode(); };
