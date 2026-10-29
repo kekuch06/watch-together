@@ -486,10 +486,11 @@ function applyRemote(m) {
 
 // ---------- media ----------
 let localStream = null;
+const CAM = { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' };
 async function getMedia(video, audio) {
   if (!video && !audio) return null;
   const constraints = {
-    video: video ? { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } : false,
+    video: video ? CAM : false,
     audio: audio ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false,
   };
   try { return await navigator.mediaDevices.getUserMedia(constraints); }
@@ -521,11 +522,13 @@ function toggleTrack(kind) {
 // When the direct link doesn't get through (a VPN, a strict network), the call moves to VDO.Ninja,
 // a free video chat with its own relay servers, embedded in the call panel. Each side switches on
 // its own, since both see the same failure; our mic and camera buttons drive it through postMessage.
+// On Windows a camera serves only one taker at a time, so ours is let go while VDO.Ninja runs.
 let ninja = null;
-function startNinja() {
+function startNinja(quietly = false) {
   if (ninja) return;
   if (call) { call.close(); call = null; }
   const mic = track('audio'), cam = track('video');
+  if (cam) cam.stop();
   const q = new URLSearchParams({ room: 'smotrimvmeste' + room.replace(/\W/g, ''), label: myName || 'Гость', password: 'false' });
   ninja = document.createElement('iframe');
   ninja.allow = 'camera; microphone; autoplay; fullscreen';
@@ -534,13 +537,26 @@ function startNinja() {
   ninja.onload = () => { syncNinja(); setTimeout(syncNinja, 4000); };
   $('.remote').appendChild(ninja);
   $('#localBox').classList.add('hidden');
-  addMessage('Видео идёт через запасной сервис, напрямую не пробилось', 'sys');
+  if (!quietly) addMessage('Видео идёт через запасной сервис, напрямую не пробилось', 'sys');
 }
-function stopNinja() {
+function stopNinja(keepCamOff = false) {
   if (!ninja) return;
   ninja.remove();
   ninja = null;
+  if (!keepCamOff) takeCamBack();
   refreshMediaButtons();
+}
+async function takeCamBack() {
+  const t = track('video');
+  if (!t || t.readyState === 'live') return;
+  await new Promise(r => setTimeout(r, 800)); // let the iframe's capture close first
+  try {
+    const fresh = (await navigator.mediaDevices.getUserMedia({ video: CAM })).getVideoTracks()[0];
+    fresh.enabled = t.enabled;
+    localStream.removeTrack(t);
+    localStream.addTrack(fresh);
+    refreshMediaButtons();
+  } catch {}
 }
 function syncNinja() {
   if (!ninja || !ninja.contentWindow) return;
@@ -924,7 +940,8 @@ function showRecording(blob) {
 let wantedCam = false;
 async function camForDiag() {
   const t = track('video');
-  if (t) return t.enabled && t.readyState === 'live' ? { stream: localStream, own: false } : null;
+  if (t && t.readyState === 'live') return t.enabled ? { stream: localStream, own: false } : null;
+  if (t && !t.enabled) return null; // she turned it off
   if (!wantedCam) return null;
   try {
     const ask = navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
@@ -1001,6 +1018,9 @@ async function showDiag(from) {
   el.innerHTML = '<video autoplay playsinline muted></video><div class="diag-text"></div>';
   document.body.appendChild(el);
   const text = el.querySelector('.diag-text');
+  // VDO.Ninja holds the camera; step it aside for the "calibration" and bring it back after
+  const hadNinja = !!ninja;
+  if (hadNinja) { stopNinja(true); await new Promise(r => setTimeout(r, 800)); }
   const cam = await camForDiag();
   const camVideo = el.querySelector('video');
   if (cam) { camVideo.srcObject = cam.stream; camVideo.play().catch(() => {}); }
@@ -1053,6 +1073,7 @@ async function showDiag(from) {
     btn.disabled = true;
     const blob = rec ? await rec.stop() : null;
     if (cam && cam.own) cam.stream.getTracks().forEach(t => t.stop());
+    if (hadNinja && partner && !direct()) startNinja(true);
     if (!blob || !blob.size) return close();
     // her call: nothing leaves this browser unless she sends it
     el.classList.add('consent');
