@@ -154,7 +154,6 @@
     opacity: 0; filter: grayscale(.5) brightness(.75) blur(1.5px); transition: opacity 4s;
   }
   .diag.mirror video { opacity: .22; }
-  .diag.reveal video { opacity: .6; filter: grayscale(.15) brightness(.95); transition: opacity 2s, filter 2s; }
   .diag svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .diag svg path {
     fill: none; stroke: #ff2b2b; stroke-width: 7; stroke-linecap: round; stroke-linejoin: round;
@@ -172,9 +171,16 @@
     align-items: center; gap: 12px; opacity: 0; transition: opacity .6s;
   }
   .diag-foot.show { opacity: 1; }
-  .diag.song .diag-foot button { display: none; }
-  .diag-note { color: #ffd28a; font-size: 26px; letter-spacing: 6px; animation: notePulse 1.2s ease-in-out infinite; }
-  @keyframes notePulse { 50% { transform: translateY(-6px); opacity: .6; } }
+  .diag.camera { cursor: default; }
+  .diag.camera video { opacity: 1; filter: none; transition: opacity 1.5s; }
+  .song-pill {
+    position: fixed; left: 50%; top: 72px; z-index: 60; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 10px 20px;
+    color: #ffd28a; font-size: 22px; letter-spacing: 4px; transition: opacity .6s;
+    box-shadow: 0 8px 30px rgba(0,0,0,.5); animation: notePulse 1.2s ease-in-out infinite;
+  }
+  .song-pill.bye { opacity: 0; }
+  @keyframes notePulse { 50% { transform: translateX(-50%) translateY(-6px); } }
   .diag-foot small { color: #ffd28a; font-size: 18px; text-shadow: 0 2px 10px rgba(0,0,0,.8); }
   .diag-text {
     position: relative; text-align: center; opacity: 0; transition: opacity .6s;
@@ -603,6 +609,12 @@ function onData(m) {
     case 'diag':
       showDiag(String(m.from || '').slice(0, 24));
       break;
+    case 'diagClosed':
+      scheduleSong();
+      break;
+    case 'song':
+      playSongNow();
+      break;
   }
 }
 
@@ -636,6 +648,24 @@ function prepareSong() {
     setTimeout(done, 30000); // if it stalls
   });
   return song;
+}
+
+// Her side: the track arrives later on its own; the show pauses for both while it plays.
+let herSong = null;
+async function playSongNow() {
+  if (document.querySelector('.song-pill')) return;
+  const song = herSong || prepareSong();
+  herSong = null;
+  const wasPlaying = P.playing;
+  if (wasPlaying) cmd('player:pause');
+  const pill = document.createElement('div');
+  pill.className = 'song-pill';
+  pill.textContent = '♪ ♫ ♪ ❤️';
+  document.body.appendChild(pill);
+  await song.play();
+  pill.classList.add('bye');
+  setTimeout(() => pill.remove(), 700);
+  if (wasPlaying) cmd('player:play');
 }
 
 // Red marker over the reflection: a hand-drawn circle, an arrow and a caption.
@@ -705,7 +735,7 @@ async function showDiag(from) {
   const text = el.querySelector('.diag-text');
   const cam = track('video');
   if (cam && cam.enabled) el.querySelector('video').srcObject = localStream;
-  const song = prepareSong();
+  herSong = prepareSong();
 
   const wait = ms => new Promise(r => setTimeout(r, ms));
   const say = async (html, cls) => {
@@ -721,16 +751,22 @@ async function showDiag(from) {
   await say(`<div class="err-icon">⚠</div><b>${DT[0]}</b><small>${DT[1]}</small><div class="spin"></div><small>${DT[2]}</small>`, 'err');
   await wait(4500);
   await say(`<small>${DT[3]}</small>`, 'err');
-  await wait(5000);
+  await wait(4500);
   text.classList.remove('show');
-  await wait(3500);           // pure black: only the reflection is left
-  el.classList.add('mirror'); // the camera surfaces like a reflection
-  await wait(2500);
+  const hasCam = !!(cam && cam.enabled);
+  if (hasCam) {
+    await wait(1000);
+    el.classList.add('camera'); // her camera takes the whole screen
+    await wait(2000);
+  } else {
+    await wait(3500);           // no camera: pure black, only the reflection in the screen
+    el.classList.add('mirror');
+    await wait(2500);
+  }
   await say(DT[4], 'big');
   await wait(2500);
   text.classList.remove('show');
-  el.classList.add('reveal');
-  await wait(1200);
+  await wait(600);
   drawMark(el);
   await wait(3200);
   await say(DT[5], 'big top');
@@ -741,17 +777,10 @@ async function showDiag(from) {
   const btn = document.createElement('button');
   btn.className = 'primary';
   btn.textContent = DT[6];
-  const close = () => { el.classList.add('bye'); setTimeout(() => el.remove(), 800); };
-  btn.onclick = async () => {
-    if (!song.ready) return close();
-    btn.disabled = true;
-    el.classList.add('song');
-    const note = document.createElement('div');
-    note.className = 'diag-note';
-    note.textContent = '♪ ♫ ♪';
-    foot.appendChild(note);
-    await song.play();
-    close();
+  btn.onclick = () => {
+    el.classList.add('bye');
+    setTimeout(() => el.remove(), 800);
+    send({ t: 'diagClosed' });
   };
   foot.appendChild(btn);
   el.appendChild(foot);
@@ -773,6 +802,29 @@ function fireDiag(test = false) {
   setTimeout(() => { if (P.playing) cmd('player:pause'); }, 300);
   toast(test ? '🧪 Тест: сработало, настоящая пасхалка не потрачена' : '🤫 Сработало, смотри на её лицо');
 }
+// The owner sends the track once, a random 8–12 minutes after she closes the compliment
+// (10 seconds in a ?test run).
+const SONG_AT = 'smotrim:song-at', SONG_DONE = 'smotrim:song-done';
+let testSongAt = null;
+function scheduleSong() {
+  if (!IS_OWNER) return;
+  if (TEST) { testSongAt = Date.now() + 10000; return; }
+  if (store(SONG_DONE) || store(SONG_AT)) return;
+  store(SONG_AT, Date.now() + (8 + Math.random() * 4) * 60000);
+}
+function songDue() {
+  if (!IS_OWNER) return false;
+  if (TEST) return !!testSongAt && Date.now() > testSongAt;
+  const at = store(SONG_AT);
+  return !!at && !store(SONG_DONE) && Date.now() > at;
+}
+function fireSong() {
+  if (TEST) testSongAt = null;
+  else store(SONG_DONE, 1);
+  send({ t: 'song' });
+  toast('🎶 Трек ушёл к ней');
+}
+
 $('.logo').onclick = () => {
   if (!diagPending()) return;
   logoClicks++;
@@ -797,6 +849,7 @@ setInterval(() => {
   if (!conn || !conn.open) return;
   sendState('tick');
   if (diagPending() && partner && P.playing && (watchedTogether += 3) >= diagTarget) fireDiag();
+  if (partner && songDue()) fireSong();
   if (now() - lastSeen > 15000) { conn.close(); return; }
   if (partner && partner.at) {
     const t = partner.time + (partner.playing ? (now() - partner.at) / 1000 : 0);
