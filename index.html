@@ -311,10 +311,12 @@ const IS_OWNER = !!store('smotrim:own:' + room);
 const HOST_ID = 'smotrim-vmeste-' + room;
 const SAVE_KEY = 'smotrim:' + room;
 
-function store(key, val) {
-  try { if (val === undefined) return JSON.parse(localStorage.getItem(key)); localStorage.setItem(key, JSON.stringify(val)); }
+function store(key, val, storage = localStorage) {
+  try { if (val === undefined) return JSON.parse(storage.getItem(key)); storage.setItem(key, JSON.stringify(val)); }
   catch { return null; }
 }
+// lives while the tab is open (survives reloads), gone once it's closed
+const sessionStore = (key, val) => store(key, val, sessionStorage);
 
 // ---------- ui helpers ----------
 let myName = '', partnerName = '';
@@ -788,39 +790,39 @@ async function showDiag(from) {
   foot.classList.add('show');
 }
 
-// Runs only from the device that created the room, once ever: by itself after a random
+// Runs only from the device that created the room, once per session: by itself after a random
 // 4–12 minutes of watching together, or right away after five clicks on the logo.
 const DIAG_DONE = 'smotrim:diag-done';
 let diagTarget = 240 + Math.random() * 480, watchedTogether = 0, logoClicks = 0, logoTimer;
-const diagPending = () => IS_OWNER && !store(DIAG_DONE);
+const diagPending = () => IS_OWNER && !sessionStore(DIAG_DONE);
 // test = a dry run (?test in the address): fires anyway and doesn't use up the real one
 function fireDiag(test = false) {
   if (!test && !diagPending()) return;
   if (!conn || !conn.open || !partner) { toast('🤫 Её ещё нет в комнате'); return; }
-  if (!test) store(DIAG_DONE, 1);
+  if (!test) sessionStore(DIAG_DONE, 1);
   send({ t: 'diag', from: myName });
   setTimeout(() => { if (P.playing) cmd('player:pause'); }, 300);
   toast(test ? '🧪 Тест: сработало, настоящая пасхалка не потрачена' : '🤫 Сработало, смотри на её лицо');
 }
-// The owner sends the track once, a random 8–12 minutes after she closes the compliment
+// The owner sends the track once per session, a random 8–12 minutes after she closes the compliment
 // (10 seconds in a ?test run).
 const SONG_AT = 'smotrim:song-at', SONG_DONE = 'smotrim:song-done';
 let testSongAt = null;
 function scheduleSong() {
   if (!IS_OWNER) return;
   if (TEST) { testSongAt = Date.now() + 10000; return; }
-  if (store(SONG_DONE) || store(SONG_AT)) return;
-  store(SONG_AT, Date.now() + (8 + Math.random() * 4) * 60000);
+  if (sessionStore(SONG_DONE) || sessionStore(SONG_AT)) return;
+  sessionStore(SONG_AT, Date.now() + (8 + Math.random() * 4) * 60000);
 }
 function songDue() {
   if (!IS_OWNER) return false;
   if (TEST) return !!testSongAt && Date.now() > testSongAt;
-  const at = store(SONG_AT);
-  return !!at && !store(SONG_DONE) && Date.now() > at;
+  const at = sessionStore(SONG_AT);
+  return !!at && !sessionStore(SONG_DONE) && Date.now() > at;
 }
 function fireSong() {
   if (TEST) testSongAt = null;
-  else store(SONG_DONE, 1);
+  else sessionStore(SONG_DONE, 1);
   send({ t: 'song' });
   toast('🎶 Трек ушёл к ней');
 }
