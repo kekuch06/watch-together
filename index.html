@@ -610,8 +610,27 @@ function sendState(t) {
 }
 const announce = (re = false) => publish({ t: 'here', since: JOINED, owner: IS_OWNER, re });
 
+// One tab per browser: a newer tab of this room takes over, the older one bows out.
+function claimTab() {
+  if (!window.BroadcastChannel) return;
+  const ch = new BroadcastChannel('smotrim:' + room);
+  ch.postMessage(ME);
+  ch.onmessage = () => {
+    if (mq) { publish({ t: 'bye' }).then(() => mq.end(true)); }
+    ch.close();
+    partnerId = null; partner = null;
+    closeCall();
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
+    frame.src = 'about:blank';
+    const note = document.createElement('div');
+    note.className = 'lobby';
+    note.innerHTML = '<div class="card"><h1>Комната открыта в другой вкладке</h1><p>Эту вкладку можно закрыть.</p></div>';
+    document.body.appendChild(note);
+  };
+}
 async function start() {
   setStatus('Подключаюсь…');
+  claimTab();
   await roomKeys();
   mq = mqtt.connect(BROKER, {
     clientId: 'sv_' + ME, keepalive: 20, reconnectPeriod: 2000, connectTimeout: 10000,
@@ -634,6 +653,8 @@ function onEnvelope(m) {
   if (m.t === 'here') {
     // a newcomer (or the partner after a reload, under a new id): answer once, then pair up;
     // the answer goes out first, so they know us before our hello arrives
+    // someone else while the partner is still around (a second tab, say): not them
+    if (m.src !== partnerId && partnerId && now() - lastSeen < 8000) return;
     if (!m.re) announce(true);
     if (m.src !== partnerId) {
       if (partnerId) dropPartner(true);
@@ -676,6 +697,7 @@ function newPc() {
   p.onconnectionstatechange = () => {
     if (pc !== p) return;
     updateRemotePlaceholder();
+    if (p.connectionState === 'connected') checkRoute(p);
     if (p.connectionState === 'failed' && role === 'guest') {
       clearTimeout(callRetry);
       callRetry = setTimeout(() => { if (pc === p && linked()) startCall(); }, 4000);
@@ -688,6 +710,7 @@ function newPc() {
 }
 function closeCall() {
   clearTimeout(callRetry);
+  route = '';
   if (pc) pc.close();
   pc = null; pendingIce = [];
 }
@@ -715,15 +738,32 @@ function onIce(m) {
   if (pc && pc.remoteDescription) pc.addIceCandidate(m.c).catch(() => {});
   else pendingIce.push(m.c);
 }
-// ~350 kbit/s of video looks fine in the small call window and keeps the relay quota lasting
-function capBitrate(p) {
+// ~350 kbit/s of video looks fine in the small call window; through the TURN relay, whose free
+// quota is small, it drops to half the size and ~150 kbit/s
+let route = '';
+function capBitrate(p, relayed = route === 'relay') {
   for (const sender of p.getSenders()) {
     if (!sender.track || sender.track.kind !== 'video') continue;
     const params = sender.getParameters();
     if (!params.encodings || !params.encodings.length) params.encodings = [{}];
-    params.encodings[0].maxBitrate = 350000;
+    params.encodings[0].maxBitrate = relayed ? 150000 : 350000;
+    params.encodings[0].scaleResolutionDownBy = relayed ? 2 : 1;
     sender.setParameters(params).catch(() => {});
   }
+}
+// which way the call actually goes: straight between the browsers, or through the relay
+async function checkRoute(p) {
+  let type = '';
+  (await p.getStats()).forEach((r, _, all) => {
+    if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') {
+      const local = all.get(r.localCandidateId), remote = all.get(r.remoteCandidateId);
+      type = [local, remote].some(c => c && c.candidateType === 'relay') ? 'relay' : 'direct';
+    }
+  });
+  if (pc !== p || !type || type === route) return;
+  route = type;
+  capBitrate(p);
+  updateRemotePlaceholder();
 }
 function showRemote(stream) {
   const v = $('#remoteVideo');
@@ -737,7 +777,7 @@ function updateRemotePlaceholder() {
   $('#remoteAvatar').textContent = partner ? (who()[0] || '?').toUpperCase() : '?';
   $('#remoteNote').textContent = !partner ? 'Ждём второго человека' : partner.cam === false ? who() + ' без камеры' :
     pc && pc.connectionState === 'failed' ? 'Видео не пробилось через сеть 😕 Сериал и чат работают' : 'Соединяю видео…';
-  $('#remoteTag').textContent = who();
+  $('#remoteTag').textContent = who() + (pc && route ? (route === 'relay' ? ' · через TURN' : ' · напрямую') : '');
   $('#remoteTag').classList.toggle('hidden', !partner);
 }
 
@@ -1150,6 +1190,7 @@ setInterval(() => {
   if (P.id) store(SAVE_KEY, { id: P.id, key: P.key, time: curTime() });
   if (!linked()) { if (mq && mq.connected) announce(); return; }
   sendState('tick');
+  if (pc && pc.connectionState === 'connected') checkRoute(pc);
   updateRemotePlaceholder();
   if (!TEST && eggsOn && partner && P.playing && ['', 'songDone'].includes(stage()) &&
       (watchedTogether += 3) >= nextAt) fireNext();
