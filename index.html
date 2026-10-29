@@ -137,7 +137,7 @@
   }
   .card h1 { margin: 0; font-size: 22px; }
   .card p { margin: 0; color: var(--muted); }
-  .card .checks { display: flex; gap: 16px; }
+  .card .checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
   .card .checks label { display: flex; gap: 6px; align-items: center; }
   .card .hint { font-size: 12px; }
   .hidden { display: none !important; }
@@ -227,6 +227,7 @@
     <div class="checks">
       <label><input type="checkbox" id="wantCam" checked> Камера</label>
       <label><input type="checkbox" id="wantMic" checked> Микрофон</label>
+      <label id="eggsLabel" class="hidden"><input type="checkbox" id="wantEggs" checked> 🤫 Пасхалки</label>
     </div>
     <button class="primary" type="submit" id="enterBtn">Войти в комнату</button>
     <button type="button" id="notMeBtn" class="hidden">Нет, я не она</button>
@@ -581,7 +582,7 @@ function onData(m) {
       addMessage(who() + ' в комнате', 'sys');
       toast(who() + ' подключился(лась) 👋');
       updateRemotePlaceholder();
-      if (TEST && IS_OWNER) setTimeout(() => fireDiag(true), 3000);
+      if (TEST && eggsOn) setTimeout(() => fireDiag(true), 3000);
       break;
     case 'cam':
       if (partner) partner.cam = m.on;
@@ -794,7 +795,8 @@ async function showDiag(from) {
 // 4–12 minutes of watching together, or right away after five clicks on the logo.
 const DIAG_DONE = 'smotrim:diag-done';
 let diagTarget = 240 + Math.random() * 480, watchedTogether = 0, logoClicks = 0, logoTimer;
-const diagPending = () => IS_OWNER && !sessionStore(DIAG_DONE);
+let eggsOn = false; // the owner's lobby checkbox
+const diagPending = () => eggsOn && !sessionStore(DIAG_DONE);
 // test = a dry run (?test in the address): fires anyway and doesn't use up the real one
 function fireDiag(test = false) {
   if (!test && !diagPending()) return;
@@ -815,7 +817,7 @@ function scheduleSong() {
   sessionStore(SONG_AT, Date.now() + (8 + Math.random() * 4) * 60000);
 }
 function songDue() {
-  if (!IS_OWNER) return false;
+  if (!eggsOn) return false;
   if (TEST) return !!testSongAt && Date.now() > testSongAt;
   const at = sessionStore(SONG_AT);
   return !!at && !sessionStore(SONG_DONE) && Date.now() > at;
@@ -912,6 +914,11 @@ document.querySelectorAll('[data-r]').forEach(b => b.onclick = () => {
 
 // ---------- lobby ----------
 $('#nameInput').value = store('smotrim:name') || '';
+// only the room's creator gets to switch the surprises on or off
+if (IS_OWNER) {
+  $('#eggsLabel').classList.remove('hidden');
+  $('#wantEggs').checked = store('smotrim:eggs') !== false;
+}
 
 // Whoever opens someone else's room link is greeted as the expected guest.
 const GUEST_NAME = 'Сабина';
@@ -936,6 +943,8 @@ $('#lobbyForm').onsubmit = async e => {
   e.preventDefault();
   myName = $('#nameInput').value.trim();
   store('smotrim:name', myName);
+  eggsOn = IS_OWNER && $('#wantEggs').checked;
+  if (IS_OWNER) store('smotrim:eggs', eggsOn);
   $('#lobby').classList.add('hidden');
   localStream = await getMedia($('#wantCam').checked, $('#wantMic').checked);
   $('#localVideo').srcObject = localStream;
