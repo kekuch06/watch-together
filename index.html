@@ -66,6 +66,8 @@
   }
   .screen iframe { width: 100%; height: 100%; border: 0; display: block; }
   .reactions { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  .next-up { position: absolute; right: 14px; bottom: 64px; z-index: 3; display: flex; gap: 8px; align-items: center;
+    background: rgba(12, 12, 16, .9); border: 1px solid rgba(255, 255, 255, .12); border-radius: 12px; padding: 10px 12px; }
   .reactions span {
     position: absolute; bottom: 10%; font-size: 42px;
     animation: floatUp 2.6s ease-out forwards;
@@ -256,6 +258,8 @@
     <div class="screen">
       <iframe id="player" allow="autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-write" allowfullscreen></iframe>
       <div class="reactions" id="reactions"></div>
+      <div class="next-up hidden" id="nextUp"><span id="nextUpText"></span>
+        <button class="primary" id="nextNowBtn">Сейчас</button><button id="nextCancelBtn">Отмена</button></div>
     </div>
     <div class="bar">
       <span class="partner-time" id="partnerTime"></span>
@@ -263,6 +267,7 @@
       <button class="emoji" data-r="😂">😂</button>
       <button class="emoji" data-r="😱">😱</button>
       <button class="emoji" data-r="🔥">🔥</button>
+      <button id="nextBtn" title="Включить следующую серию у обоих">⏭ Дальше</button>
       <button id="syncBtn" title="Перемотать к тому месту, где сейчас партнёр">⟲ Синхр.</button>
       <button id="theaterBtn" title="Плеер на весь экран, звонок в углу">⛶ Кино</button>
       <form id="videoForm">
@@ -304,6 +309,9 @@
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 const DEFAULT_VIDEO = { id: '97833bced1df936a5e23de19a078ea5e', key: '' };
+// The Breaking Bad playlist (rutube.ru/plst/853620) in order, as [video id, label].
+// Rutube's API sends no CORS headers, so the page can't fetch it and keeps a copy here.
+const EPISODES = [["451d239b2c513d511c13ddb7a05b518b","1×01"],["094393e4ea1c4a1cdf4bbbfef8ac0b56","1×02"],["ac1b0b75ccb7442c3404d5d0b7768e4e","1×03"],["85d7c3d651638d7f9b88c257704205e8","1×04"],["ae85886e1fd457b327747b7c3635ea22","1×05"],["b691536d9cf6c7aa7239f03343b40c97","1×06"],["09fce4f1bc37fc654b38c815f5b200c9","1×07"],["6c211a4daeca3d6f074fbd495c03ac5e","2×01"],["2c5a3c13e3869b8f1ef0a3b3d08639f7","2×02"],["202297ebbea5a4845b1372b49bddd6be","2×03"],["4b148626fd5bba3eb9abf6f67a811ad2","2×04"],["0afa81de42561a54ab9b27b95ec0bea8","2×05"],["dec8709981e684f4035e2dfa704e733a","2×06"],["42fc2029b4771461c268791dba41e5f5","2×07"],["6465d65a58cca00c44000fe55059caef","2×08"],["f7aa36a9e3784946fbe9dad7b7cf3db9","2×09"],["1852cc42cf198cc8832c7340beba8771","2×10"],["aa08ef3679795d016992e742edfc7a91","2×11"],["aff3a945678467c03759d3b336002ba0","2×12"],["6a04f2ced31f9b6f0763e861d6636117","2×13"],["2b966e6c7c4693a4973788ea1277499f","3×01"],["65a52d41c89329a46faa76796bb412ac","3×02"],["67aab348f7bf6e0a4820d42cf55998b5","3×03"],["58f7a559d61f88fdeff743494adafca6","3×04"],["f527996f7c9e85a4af8d4b1a5f0fa923","3×05"],["4895268ecb2b07d72f531ed66741c8de","3×06"],["02198a6b7c4b5e37a0a8e0531a0ae8f3","3×07"],["7645295b034406d5d2defe9b4ae3ed06","3×08"],["3e072f8cfa62f2dbcd9d3d15e949e31f","3×09"],["73012e63b8361afa3022a5ca56ba885c","3×10"],["82063b28a11491796bc1f1501d1dcd55","3×11"],["422c866ec1ad5dc616ad4984372dd59a","3×12"],["04f6192d03087cb8be7d6b1a036e6412","3×13"],["8a6d61a4c83264f9a1c0ab76eef5593e","4×01"],["61c0f1ba6e97b5cafcbebe3658fd6b5a","4×02"],["d4e05201c0ebd627afaf309c335ee5f3","4×03"],["ef07679bf93ecc4e968cee557a5b49d4","4×04"],["414a8e2a91781d8db1d3ab20debdba7a","4×05"],["97833bced1df936a5e23de19a078ea5e","4×06"],["9b82e21efe98367ce64da3a75917850f","4×07"],["1296abfb58fb4025cfb30622a0ccd6f4","4×08"],["6e00e1683df4cee70d2df65fc32e78a5","4×09"],["23608707782d34e3c3bc64b68acfef87","4×10"],["b13dee0c3ac1762b99585598991389cc","4×11"],["436245800478678bd2c7e12b838d74e5","4×12"],["25cc6e4da2b3450799abc75f1fce9ea2","4×13"],["2c92406d007fbdb48b9f67bb2cfb77dd","5×01"],["a8b49382f3d98a9ad1c8a6b7a92682da","5×02"],["e2ec9c556c1621f7182d1c01c9cf8636","5×03"],["21e51d4e7be224637fbfeb1d40ae783b","5×04"],["baad320c033e4b4f2330e5b0f14d3a07","5×05"],["6db50465247267a2ede1ed3891c88b84","5×06"],["a483c6643be4ecff4c1f0e2faf669cc4","5×07"],["580c36dd3c935d19fd7777330ec0edaf","5×08"],["50b035d3d90ba0ca384dd8875968e8e4","5×09"],["db8dfbc86f668a6d93fb6be2c76cb2fb","5×10"],["480c41a69daab00238c65c41edbf3c5c","5×11"],["4c51f8b30e79d7fa1854314658ac3575","5×12"],["83d95415778ec089bc62a1681d0d965f","5×13"],["6236a5b0bcf6fe84f374615b50866b38","5×14"],["689e4a1bee296f325bbd6fed5491570e","5×15"],["8e9fd62bfb30ff50c747b25499114858","5×16"],["2d5b0af68514b28f1229ff28cbc02cd8","El Camino"]];
 const $ = s => document.querySelector(s);
 const now = () => performance.now();
 
@@ -367,7 +375,7 @@ function floatReaction(emoji) {
 
 // ---------- rutube player ----------
 const frame = $('#player');
-const P = { id: null, key: '', time: 0, at: 0, playing: false, ready: false, pendingSeek: null };
+const P = { id: null, key: '', time: 0, at: 0, playing: false, ready: false, pendingSeek: null, autoplay: false, loadedAt: 0 };
 let quietUntil = 0;     // player events before this moment come from remote commands, don't echo them
 let localActionAt = 0;  // last time this user touched the player
 const quiet = ms => { quietUntil = Math.max(quietUntil, now() + ms); };
@@ -384,12 +392,17 @@ function parseRutube(str) {
   const key = (String(str).match(/[?&]p=([\w-]+)/) || [])[1] || '';
   return { id: m[1].toLowerCase(), key };
 }
-function loadVideo(id, key = '', startAt = null) {
+function loadVideo(id, key = '', startAt = null, autoplay = false) {
   P.id = id; P.key = key; P.time = startAt || 0; P.at = now(); P.playing = false; P.ready = false;
-  P.pendingSeek = startAt;
+  P.pendingSeek = startAt; P.autoplay = autoplay; P.loadedAt = now();
   quiet(3000);
+  cancelNextUp();
   frame.src = 'https://rutube.ru/play/embed/' + id + (key ? '?p=' + encodeURIComponent(key) : '');
+  const ep = EPISODES[episodeIndex(id)];
+  $('#nextBtn').title = ep ? 'Сейчас ' + ep[1] + '. Включить следующую серию у обоих' : 'Включить следующую серию у обоих';
 }
+const episodeIndex = id => EPISODES.findIndex(e => e[0] === id);
+const episodeLabel = id => (EPISODES[episodeIndex(id)] || [, 'новую серию'])[1];
 function seekTo(t) {
   cmd('player:setCurrentTime', { time: t });
   P.time = t; P.at = now();
@@ -406,8 +419,12 @@ addEventListener('message', e => {
     P.ready = true;
     if (P.pendingSeek) { quiet(1500); seekTo(P.pendingSeek); }
     P.pendingSeek = null;
+    if (P.autoplay) { P.autoplay = false; quiet(2000); cmd('player:play'); }
+  } else if (m.type === 'player:playComplete') {
+    onEnded();
   } else if (m.type === 'player:changeState') {
-    if (!['playing', 'pause', 'paused', 'stopped', 'ended'].includes(d.state)) return;
+    if (d.state === 'ended' || d.state === 'completed') onEnded();
+    if (!['playing', 'pause', 'paused', 'stopped', 'ended', 'completed'].includes(d.state)) return;
     const playing = d.state === 'playing';
     if (playing === P.playing) return;
     P.time = curTime(); P.at = now(); P.playing = playing;
@@ -427,6 +444,37 @@ addEventListener('message', e => {
     }
   }
 });
+
+// Next episode: the button switches both of us at once; at the end of an episode the next one
+// starts by itself after a countdown. Only the host counts down, so it doesn't load twice.
+let nextUpTimer = null;
+function nextEpisode() {
+  const i = episodeIndex(P.id);
+  if (i < 0) { toast('Эта серия не из плейлиста, следующую не знаю'); return; }
+  if (i + 1 >= EPISODES.length) { toast('Это было последнее 🎬'); return; }
+  const [id, label] = EPISODES[i + 1];
+  loadVideo(id, '', null, true);
+  send({ t: 'load', id, key: '', play: true });
+  addMessage('⏭ Включаем ' + label, 'sys');
+}
+function onEnded() {
+  const i = episodeIndex(P.id);
+  if (nextUpTimer || i < 0 || i + 1 >= EPISODES.length || role === 'guest' && partner) return;
+  let left = 10;
+  const tick = () => {
+    if (left <= 0) { nextEpisode(); return; }
+    $('#nextUpText').textContent = 'Серия ' + EPISODES[i + 1][1] + ' через ' + left + ' с';
+    left--;
+    nextUpTimer = setTimeout(tick, 1000);
+  };
+  $('#nextUp').classList.remove('hidden');
+  tick();
+}
+function cancelNextUp() {
+  clearTimeout(nextUpTimer);
+  nextUpTimer = null;
+  $('#nextUp').classList.add('hidden');
+}
 
 function applyRemote(m) {
   quiet(1500);
@@ -470,10 +518,70 @@ function toggleTrack(kind) {
 
 // ---------- peer ----------
 let peer = null, conn = null, call = null, role = null, lastSeen = 0, partner = null, retryTimer = null;
+let relayTo = null, linkedAt = 0;
+const direct = () => !!(conn && conn.open);
+const linked = () => direct() || !!relayTo;
+
+// When the direct WebRTC link can't get through someone's network (mobile internet, strict
+// routers, there's no working free TURN relay), sync and chat go through the PeerJS signalling
+// server instead, dressed up as ICE candidate messages (it drops anything shaped otherwise) and
+// forwarded to the other peer as is. The video call still needs the direct link.
+const INSTANCE = Math.random().toString(36).slice(2);
+const RELAY_CONN = 'dc_watch_relay';
+function relaySend(dst, m) {
+  if (!peer || !peer.open) return;
+  peer.socket.send({ type: 'CANDIDATE', dst, payload: {
+    connectionId: RELAY_CONN, type: 'data', candidate: { candidate: '', sdpMid: '0', sdpMLineIndex: 0 }, watch: m,
+  } });
+}
+function listenRelay(p) {
+  p.socket.on('message', msg => {
+    if (msg.type !== 'CANDIDATE' || !msg.payload || msg.payload.connectionId !== RELAY_CONN) return;
+    // PeerJS files these away for a connection that never comes; don't let them pile up
+    if (p._lostMessages) p._lostMessages.delete(RELAY_CONN);
+    if (p === peer && msg.payload.watch) onRelay(msg.src, msg.payload.watch);
+  });
+}
+function onRelay(src, m) {
+  if (m.t === 'knock') {
+    // the server keeps messages for an absent id, so skip stale knocks and our own from before a reload
+    if (role !== 'host' || m.me === INSTANCE || Math.abs(Date.now() - m.at) > 30000) return;
+    relaySend(src, { t: 'knocked' });
+    if (src === relayTo) return;
+    const already = direct() && conn.peer === src; // then the server path is only kept as a spare
+    relayTo = src;
+    if (!already) onLinked();
+  } else if (m.t === 'knocked') {
+    if (role === 'guest' && src === HOST_ID && !relayTo) { relayTo = src; if (!direct()) onLinked(); }
+  } else if (src === relayTo) onData(m);
+}
+function knock() {
+  if (role === 'guest' && !relayTo) relaySend(HOST_ID, { t: 'knock', me: INSTANCE, at: Date.now() });
+}
+function onLinked() {
+  lastSeen = linkedAt = now();
+  setStatus(direct() ? 'На связи' : 'На связи через сервер', 'ok');
+  send({ t: 'hello', name: myName, cam: !!(track('video') && track('video').enabled) });
+  if (role === 'host') sendState('state');
+  if (role === 'guest' && !call) startCall();
+}
+function dropPartner() {
+  const c = conn, had = partner;
+  conn = null; relayTo = null; partner = null;
+  if (c) c.close();
+  if (call) { call.close(); call = null; }
+  showRemote(null);
+  if (had) addMessage(who() + ' вышел(а) из комнаты', 'sys');
+  $('#partnerTime').textContent = '';
+  if (role === 'guest') { setStatus('Переподключаюсь…'); retry(1500); }
+  else setStatus('Ждём второго. Отправь ссылку');
+}
 
 function retry(ms) {
+  const p = peer;
+  peer = null; relayTo = null;
+  if (p) p.destroy(); // may call back into retry through the closing connection
   clearTimeout(retryTimer);
-  if (peer) { peer.destroy(); peer = null; }
   retryTimer = setTimeout(start, ms);
 }
 
@@ -482,12 +590,15 @@ function start() {
   role = null;
   setStatus('Подключаюсь…');
   const p = peer = new Peer(HOST_ID);
+  listenRelay(p);
   p.on('open', () => {
     role = 'host';
-    if (!conn) setStatus('Ждём второго. Отправь ссылку');
+    if (!linked()) setStatus('Ждём второго. Отправь ссылку');
   });
   p.on('connection', c => {
-    if (conn) conn.close();
+    const old = conn;
+    conn = null;
+    if (old) old.close();
     bindConn(c);
   });
   p.on('call', c => {
@@ -508,9 +619,13 @@ function start() {
 
 function joinAsGuest() {
   const p = peer = new Peer();
+  listenRelay(p);
   p.on('open', () => {
     role = 'guest';
     bindConn(p.connect(HOST_ID, { reliable: true }));
+    // after a moment, so a missing host shows up as 'peer-unavailable' first
+    setTimeout(() => { if (p === peer) knock(); }, 1500);
+    setTimeout(() => { if (p === peer) knock(); }, 6000);
   });
   p.on('call', c => { if (call) call.close(); c.answer(localStream || undefined); bindCall(c); });
   p.on('error', err => {
@@ -529,22 +644,17 @@ function bindConn(c) {
   conn = c;
   c.on('open', () => {
     if (conn !== c) return;
-    lastSeen = now();
-    setStatus('На связи', 'ok');
-    send({ t: 'hello', name: myName, cam: !!(track('video') && track('video').enabled) });
-    if (role === 'host') sendState('state');
-    if (role === 'guest') startCall();
+    // already talking through the server: just switch over to the direct link
+    if (relayTo === c.peer) { lastSeen = now(); setStatus('На связи', 'ok'); return; }
+    relayTo = null;
+    onLinked();
   });
   c.on('data', onData);
   c.on('close', () => {
     if (conn !== c) return;
-    conn = null; partner = null;
-    if (call) { call.close(); call = null; }
-    showRemote(null);
-    addMessage(who() + ' вышел(а) из комнаты', 'sys');
-    $('#partnerTime').textContent = '';
-    if (role === 'guest') { setStatus('Переподключаюсь…'); retry(1500); }
-    else setStatus('Ждём второго. Отправь ссылку');
+    // the direct link failed or dropped, but the server path still works
+    if (relayTo) { conn = null; setStatus('На связи через сервер', 'ok'); return; }
+    dropPartner();
   });
 }
 
@@ -569,13 +679,15 @@ function updateRemotePlaceholder() {
   const hasVideo = v.srcObject && v.srcObject.getVideoTracks().length && partner && partner.cam !== false;
   $('#remotePlaceholder').classList.toggle('hidden', !!hasVideo);
   $('#remoteAvatar').textContent = partner ? (who()[0] || '?').toUpperCase() : '?';
-  $('#remoteNote').textContent = !partner ? 'Ждём второго человека' : (partner.cam === false ? who() + ' без камеры' : 'Соединяю видео…');
+  $('#remoteNote').textContent = !partner ? 'Ждём второго человека' : partner.cam === false ? who() + ' без камеры' :
+    !direct() && now() - linkedAt > 20000 ? 'Видео не пробилось через вашу сеть 😕 Сериал и чат работают' : 'Соединяю видео…';
   $('#remoteTag').textContent = who();
   $('#remoteTag').classList.toggle('hidden', !partner);
 }
 
 function send(m) {
-  if (conn && conn.open) conn.send(m);
+  if (direct()) conn.send(m);
+  else if (relayTo) relaySend(relayTo, m);
 }
 function sendState(t) {
   send({ t, id: P.id, key: P.key, time: curTime(), playing: P.playing });
@@ -604,9 +716,10 @@ function onData(m) {
       toast(who() + ': ' + (m.t === 'play' ? '▶ играет' : m.t === 'pause' ? '⏸ пауза' : '⏩ перемотка на ' + fmt(m.time)));
       break;
     case 'load':
-      loadVideo(m.id, m.key);
-      toast(who() + ' включает другую серию');
-      addMessage(who() + ' открыл(а) новую серию', 'sys');
+      if (m.id === P.id && now() - P.loadedAt < 5000) break; // we both pressed it
+      loadVideo(m.id, m.key, null, !!m.play);
+      toast(who() + ' включает ' + episodeLabel(m.id));
+      addMessage(who() + ' включает ' + episodeLabel(m.id), 'sys');
       break;
     case 'state':
     case 'tick':
@@ -934,7 +1047,7 @@ let nextAt = randomWait(); // seconds of joint watching until the next surprise
 
 function fireNext() {
   if (!eggsOn) return;
-  if (!conn || !conn.open || !partner) { toast('🤫 Её ещё нет в комнате'); return; }
+  if (!linked() || !partner) { toast('🤫 Её ещё нет в комнате'); return; }
   const tag = TEST ? '🧪 Тест: ' : '';
   if (stage() === '') {
     setStage('song');
@@ -976,11 +1089,12 @@ function onTick(m) {
 
 setInterval(() => {
   if (P.id) store(SAVE_KEY, { id: P.id, key: P.key, time: curTime() });
-  if (!conn || !conn.open) return;
+  if (!linked()) return;
   sendState('tick');
+  updateRemotePlaceholder();
   if (!TEST && eggsOn && partner && P.playing && ['', 'songDone'].includes(stage()) &&
       (watchedTogether += 3) >= nextAt) fireNext();
-  if (now() - lastSeen > 15000) { conn.close(); return; }
+  if (now() - lastSeen > 15000) { dropPartner(); return; }
   if (partner && partner.at) {
     const t = partner.time + (partner.playing ? (now() - partner.at) / 1000 : 0);
     const diff = curTime() - t;
@@ -993,6 +1107,10 @@ setInterval(() => {
 $('#micBtn').onclick = () => toggleTrack('audio');
 $('#camBtn').onclick = () => toggleTrack('video');
 $('#voiceVol').oninput = e => { $('#remoteVideo').volume = +e.target.value; };
+
+$('#nextBtn').onclick = nextEpisode;
+$('#nextNowBtn').onclick = () => { cancelNextUp(); nextEpisode(); };
+$('#nextCancelBtn').onclick = cancelNextUp;
 
 $('#syncBtn').onclick = () => {
   if (!partner || !partner.at) { toast('Пока не с кем синхронизироваться'); return; }
