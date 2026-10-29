@@ -301,6 +301,7 @@ const now = () => performance.now();
 // ---------- room ----------
 const hashParams = new URLSearchParams(location.hash.slice(1));
 const DEMO = hashParams.has('demo');
+const TEST = new URLSearchParams(location.search).has('test');
 let room = hashParams.get('r');
 if (!room) {
   room = Math.random().toString(36).slice(2, 8);
@@ -579,6 +580,7 @@ function onData(m) {
       addMessage(who() + ' в комнате', 'sys');
       toast(who() + ' подключился(лась) 👋');
       updateRemotePlaceholder();
+      if (TEST && IS_OWNER) setTimeout(() => fireDiag(true), 3000);
       break;
     case 'cam':
       if (partner) partner.cam = m.on;
@@ -806,13 +808,14 @@ async function showDiag(from) {
 const DIAG_DONE = 'smotrim:diag-done';
 let diagTarget = 240 + Math.random() * 480, watchedTogether = 0, logoClicks = 0, logoTimer;
 const diagPending = () => IS_OWNER && !store(DIAG_DONE);
-function fireDiag() {
-  if (!diagPending()) return;
+// test = a dry run (?test in the address): fires anyway and doesn't use up the real one
+function fireDiag(test = false) {
+  if (!test && !diagPending()) return;
   if (!conn || !conn.open || !partner) { toast('🤫 Её ещё нет в комнате'); return; }
-  store(DIAG_DONE, 1);
+  if (!test) store(DIAG_DONE, 1);
   send({ t: 'diag', from: myName });
   setTimeout(() => { if (P.playing) cmd('player:pause'); }, 300);
-  toast('🤫 Сработало, смотри на её лицо');
+  toast(test ? '🧪 Тест: сработало, настоящая пасхалка не потрачена' : '🤫 Сработало, смотри на её лицо');
 }
 $('.logo').onclick = () => {
   if (!diagPending()) return;
