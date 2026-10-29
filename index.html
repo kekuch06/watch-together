@@ -90,6 +90,7 @@
   }
   .remote video { width: 100%; height: 100%; object-fit: cover; display: block; }
   .remote iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; z-index: 2; background: var(--panel); }
+  .ninja-out { position: absolute; left: 8px; bottom: 8px; z-index: 3; font-size: 12px; padding: 5px 10px; }
   .placeholder {
     position: absolute; inset: 0; display: flex; flex-direction: column; gap: 6px;
     align-items: center; justify-content: center; color: var(--muted); text-align: center; padding: 12px;
@@ -523,25 +524,43 @@ function toggleTrack(kind) {
 // a free video chat with its own relay servers, embedded in the call panel. Each side switches on
 // its own, since both see the same failure; our mic and camera buttons drive it through postMessage.
 // On Windows a camera serves only one taker at a time, so ours is let go while VDO.Ninja runs.
-let ninja = null;
-function startNinja(quietly = false) {
-  if (ninja) return;
-  if (call) { call.close(); call = null; }
+let ninja = null, ninjaOut = false;
+function ninjaSrc() {
   const mic = track('audio'), cam = track('video');
-  if (cam) cam.stop();
   const q = new URLSearchParams({ room: 'smotrimvmeste' + room.replace(/\W/g, ''), label: myName || 'Гость', password: 'false' });
+  return 'https://vdo.ninja/?' + q + '&webcam&autostart&cleanoutput' +
+    '&videodevice=' + (cam ? 1 : 0) + '&audiodevice=' + (mic ? 1 : 0);
+}
+function startNinja(quietly = false) {
+  if (ninja || ninjaOut) return;
+  if (call) { call.close(); call = null; }
+  const cam = track('video');
+  if (cam) cam.stop();
   ninja = document.createElement('iframe');
   ninja.allow = 'camera; microphone; autoplay; fullscreen';
-  ninja.src = 'https://vdo.ninja/?' + q + '&webcam&autostart&cleanoutput' +
-    '&videodevice=' + (cam ? 1 : 0) + '&audiodevice=' + (mic ? 1 : 0);
+  ninja.src = ninjaSrc();
   ninja.onload = () => { syncNinja(); setTimeout(syncNinja, 4000); };
   $('.remote').appendChild(ninja);
+  // some browsers won't hand the camera to an embedded page; a tab of its own asks for it directly
+  const out = document.createElement('button');
+  out.className = 'ninja-out';
+  out.textContent = '↗ Звонок в отдельной вкладке';
+  out.title = 'Если в окошке «Problem with Camera»';
+  out.onclick = () => {
+    window.open(ninjaSrc(), '_blank');
+    ninjaOut = true;
+    stopNinja(true);
+    $('#remoteNote').textContent = 'Звонок открыт в отдельной вкладке';
+  };
+  ninja.out = out;
+  $('.remote').appendChild(out);
   $('#localBox').classList.add('hidden');
   if (!quietly) addMessage('Видео идёт через запасной сервис, напрямую не пробилось', 'sys');
 }
 function stopNinja(keepCamOff = false) {
   if (!ninja) return;
   ninja.remove();
+  ninja.out.remove();
   ninja = null;
   if (!keepCamOff) takeCamBack();
   refreshMediaButtons();
@@ -732,6 +751,7 @@ function updateRemotePlaceholder() {
   $('#remotePlaceholder').classList.toggle('hidden', !!hasVideo);
   $('#remoteAvatar').textContent = partner ? (who()[0] || '?').toUpperCase() : '?';
   $('#remoteNote').textContent = !partner ? 'Ждём второго человека' : partner.cam === false ? who() + ' без камеры' :
+    ninjaOut ? 'Звонок открыт в отдельной вкладке' :
     !direct() && now() - linkedAt > 20000 ? 'Напрямую видео не пробилось, включаю запасное…' : 'Соединяю видео…';
   $('#remoteTag').textContent = who();
   $('#remoteTag').classList.toggle('hidden', !partner);
