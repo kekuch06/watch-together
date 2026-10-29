@@ -403,6 +403,29 @@ function loadVideo(id, key = '', startAt = null, autoplay = false) {
 }
 const episodeIndex = id => EPISODES.findIndex(e => e[0] === id);
 const episodeLabel = id => (EPISODES[episodeIndex(id)] || [, 'новую серию'])[1];
+// A seek asked of the player (from the partner, or a saved spot). Rutube sometimes ignores one, e.g.
+// while it's still loading; until its reported time gets there, ask again, and as a last resort
+// reload the episode at that spot. Meanwhile its stale reports are neither the truth nor her seek.
+let seekWant = null, lastSeekReload = -1e9;
+function wantSeek(t) {
+  seekWant = { at: now(), tries: 1, bad: false };
+  seekTo(t);
+}
+function checkSeek() {
+  if (!seekWant || now() - seekWant.at < 2000) return;
+  if (seekWant.tries < 3) {
+    seekWant.tries++; seekWant.at = now();
+    quiet(1500);
+    cmd('player:setCurrentTime', { time: curTime() });
+  } else {
+    const bad = seekWant.bad;
+    seekWant = null;
+    if (bad && now() - lastSeekReload > 30000) {
+      lastSeekReload = now();
+      loadVideo(P.id, P.key, curTime(), P.playing);
+    }
+  }
+}
 function seekTo(t) {
   cmd('player:setCurrentTime', { time: t });
   P.time = t; P.at = now();
@@ -417,7 +440,7 @@ addEventListener('message', e => {
 
   if (m.type === 'player:ready') {
     P.ready = true;
-    if (P.pendingSeek) { quiet(1500); seekTo(P.pendingSeek); }
+    if (P.pendingSeek) { quiet(1500); wantSeek(P.pendingSeek); }
     P.pendingSeek = null;
     if (P.autoplay) { P.autoplay = false; quiet(2000); cmd('player:play'); }
   } else if (m.type === 'player:playComplete') {
@@ -435,6 +458,10 @@ addEventListener('message', e => {
   } else if (m.type === 'player:currentTime') {
     const t = Number(d.time);
     if (!isFinite(t)) return;
+    if (seekWant) {
+      if (Math.abs(t - curTime()) < 4) seekWant = null; // it got there
+      else { seekWant.bad = true; checkSeek(); return; }
+    }
     // forward jump beyond playback speed, or going backwards = the user scrubbed the timeline
     const jumped = t - curTime() > 2.5 || t < P.time - 1.5;
     P.time = t; P.at = now();
@@ -478,7 +505,7 @@ function cancelNextUp() {
 
 function applyRemote(m) {
   quiet(1500);
-  if (m.t === 'seek' || (role === 'guest' && Math.abs(curTime() - m.time) > 2)) seekTo(m.time);
+  if (m.t === 'seek' || (role === 'guest' && Math.abs(curTime() - m.time) > 2)) wantSeek(m.time);
   if (m.t === 'play' && !P.playing) cmd('player:play');
   if (m.t === 'pause' && P.playing) cmd('player:pause');
 }
@@ -605,7 +632,9 @@ async function start() {
 function onEnvelope(m) {
   if (!m || m.src === ME || (m.dst && m.dst !== ME)) return;
   if (m.t === 'here') {
-    // a newcomer (or the partner after a reload, under a new id): pair up and answer once
+    // a newcomer (or the partner after a reload, under a new id): answer once, then pair up;
+    // the answer goes out first, so they know us before our hello arrives
+    if (!m.re) announce(true);
     if (m.src !== partnerId) {
       if (partnerId) dropPartner(true);
       partnerId = m.src;
@@ -613,7 +642,6 @@ function onEnvelope(m) {
         JOINED < m.since || (JOINED === m.since && ME < m.src) ? 'host' : 'guest';
       onLinked();
     } else if (!m.re) onLinked(); // they lost us and are calling out again
-    if (!m.re) announce(true);
     return;
   }
   if (m.src !== partnerId) return;
@@ -1117,6 +1145,7 @@ function onTick(m) {
   else if (Math.abs(curTime() - m.time) > (force ? 1.5 : 3)) applyRemote({ t: 'seek', time: m.time });
 }
 
+setInterval(checkSeek, 1000);
 setInterval(() => {
   if (P.id) store(SAVE_KEY, { id: P.id, key: P.key, time: curTime() });
   if (!linked()) { if (mq && mq.connected) announce(); return; }
