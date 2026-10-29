@@ -589,11 +589,19 @@ function syncNinja() {
 // ---------- peer ----------
 let peer = null, conn = null, call = null, role = null, lastSeen = 0, partner = null, retryTimer = null;
 let relayTo = null, linkedAt = 0;
+
+// TURN relay (metered.ca, free plan) for when the two browsers can't reach each other directly,
+// e.g. behind a VPN: the call then goes through it over port 443 like ordinary web traffic.
+// The free plan has 500 MB a month, so the call's video is kept modest (see capBitrate).
+const TURN = ['turn:global.relay.metered.ca:80', 'turn:global.relay.metered.ca:80?transport=tcp',
+  'turn:global.relay.metered.ca:443', 'turns:global.relay.metered.ca:443?transport=tcp']
+  .map(urls => ({ urls, username: '737ae3d0d4f067b632f7a44d', credential: '3YivipeEg3BbBLEA' }));
+const PEER_OPTS = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, ...TURN] } };
 const direct = () => !!(conn && conn.open);
 const linked = () => direct() || !!relayTo;
 
-// When the direct WebRTC link can't get through someone's network (mobile internet, strict
-// routers, there's no working free TURN relay), sync and chat go through the PeerJS signalling
+// When the WebRTC link can't get through someone's network even with the TURN relay (or the
+// relay's quota runs out), sync and chat still go through the PeerJS signalling
 // server instead, dressed up as ICE candidate messages (it drops anything shaped otherwise) and
 // forwarded to the other peer as is. The video call still needs the direct link.
 const INSTANCE = Math.random().toString(36).slice(2);
@@ -660,7 +668,7 @@ function retry(ms) {
 function start() {
   role = null;
   setStatus('Подключаюсь…');
-  const p = peer = new Peer(HOST_ID);
+  const p = peer = new Peer(HOST_ID, PEER_OPTS);
   listenRelay(p);
   p.on('open', () => {
     role = 'host';
@@ -689,7 +697,7 @@ function start() {
 }
 
 function joinAsGuest() {
-  const p = peer = new Peer();
+  const p = peer = new Peer(PEER_OPTS);
   listenRelay(p);
   p.on('open', () => {
     role = 'guest';
@@ -737,8 +745,20 @@ function startCall() {
 }
 function bindCall(c) {
   call = c;
-  c.on('stream', s => { if (call === c && !ninja) showRemote(s); });
+  c.on('stream', s => { if (call === c && !ninja) { showRemote(s); capBitrate(c); } });
   c.on('close', () => { if (call === c) { call = null; showRemote(null); } });
+}
+// ~350 kbit/s of video looks fine in the small call window and keeps the relay quota lasting
+function capBitrate(c) {
+  const pc = c.peerConnection;
+  if (!pc) return;
+  for (const sender of pc.getSenders()) {
+    if (!sender.track || sender.track.kind !== 'video') continue;
+    const params = sender.getParameters();
+    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+    params.encodings[0].maxBitrate = 350000;
+    sender.setParameters(params).catch(() => {});
+  }
 }
 function showRemote(stream) {
   const v = $('#remoteVideo');
@@ -752,7 +772,8 @@ function updateRemotePlaceholder() {
   $('#remoteAvatar').textContent = partner ? (who()[0] || '?').toUpperCase() : '?';
   $('#remoteNote').textContent = !partner ? 'Ждём второго человека' : partner.cam === false ? who() + ' без камеры' :
     ninjaOut ? 'Звонок открыт в отдельной вкладке' :
-    !direct() && now() - linkedAt > 20000 ? 'Напрямую видео не пробилось, включаю запасное…' : 'Соединяю видео…';
+    !direct() && now() - linkedAt > 20000 ? (TURN.length ? 'Видео не пробилось через сеть 😕 Сериал и чат работают' :
+    'Напрямую видео не пробилось, включаю запасное…') : 'Соединяю видео…';
   $('#remoteTag').textContent = who();
   $('#remoteTag').classList.toggle('hidden', !partner);
 }
@@ -1181,7 +1202,7 @@ setInterval(() => {
   if (!linked()) return;
   sendState('tick');
   updateRemotePlaceholder();
-  if (!direct() && partner && now() - linkedAt > 12000) startNinja();
+  if (!TURN.length && !direct() && partner && now() - linkedAt > 12000) startNinja();
   if (!TEST && eggsOn && partner && P.playing && ['', 'songDone'].includes(stage()) &&
       (watchedTogether += 3) >= nextAt) fireNext();
   if (now() - lastSeen > 15000) { dropPartner(); return; }
