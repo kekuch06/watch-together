@@ -299,11 +299,14 @@ const now = () => performance.now();
 
 // ---------- room ----------
 const hashParams = new URLSearchParams(location.hash.slice(1));
+const DEMO = hashParams.has('demo');
 let room = hashParams.get('r');
 if (!room) {
   room = Math.random().toString(36).slice(2, 8);
   history.replaceState(null, '', '#r=' + room);
+  if (!DEMO) store('smotrim:own:' + room, 1);
 }
+const IS_OWNER = !!store('smotrim:own:' + room);
 const HOST_ID = 'smotrim-vmeste-' + room;
 const SAVE_KEY = 'smotrim:' + room;
 
@@ -797,26 +800,25 @@ async function showDiag(from) {
   foot.classList.add('show');
 }
 
-// Five clicks on the logo arm it for a random moment; five more fire it right away.
-let diagAt = null, logoClicks = 0, logoTimer;
+// Runs only from the device that created the room, once ever: by itself after a random
+// 4–12 minutes of watching together, or right away after five clicks on the logo.
+const DIAG_DONE = 'smotrim:diag-done';
+let diagTarget = 240 + Math.random() * 480, watchedTogether = 0, logoClicks = 0, logoTimer;
+const diagPending = () => IS_OWNER && !store(DIAG_DONE);
 function fireDiag() {
-  if (!conn || !conn.open) { toast('🤫 Её ещё нет в комнате'); return; }
-  diagAt = null;
+  if (!diagPending()) return;
+  if (!conn || !conn.open || !partner) { toast('🤫 Её ещё нет в комнате'); return; }
+  store(DIAG_DONE, 1);
   send({ t: 'diag', from: myName });
   setTimeout(() => { if (P.playing) cmd('player:pause'); }, 300);
   toast('🤫 Сработало, смотри на её лицо');
 }
 $('.logo').onclick = () => {
+  if (!diagPending()) return;
   logoClicks++;
   clearTimeout(logoTimer);
   logoTimer = setTimeout(() => { logoClicks = 0; }, 1500);
-  if (logoClicks < 5) return;
-  logoClicks = 0;
-  if (diagAt) fireDiag();
-  else {
-    diagAt = now() + (4 + Math.random() * 8) * 60000;
-    toast('🤫 Заряжено: сработает в случайный момент. Ещё 5 кликов — прямо сейчас');
-  }
+  if (logoClicks >= 5) { logoClicks = 0; fireDiag(); }
 };
 
 // Both sides send ticks every few seconds; only the guest corrects itself toward the host.
@@ -834,7 +836,7 @@ setInterval(() => {
   if (P.id) store(SAVE_KEY, { id: P.id, key: P.key, time: curTime() });
   if (!conn || !conn.open) return;
   sendState('tick');
-  if (diagAt && now() > diagAt && P.playing) fireDiag();
+  if (diagPending() && partner && P.playing && (watchedTogether += 3) >= diagTarget) fireDiag();
   if (now() - lastSeen > 15000) { conn.close(); return; }
   if (partner && partner.at) {
     const t = partner.time + (partner.playing ? (now() - partner.at) / 1000 : 0);
@@ -906,6 +908,8 @@ $('#lobbyForm').onsubmit = async e => {
   const saved = store(SAVE_KEY);
   if (saved && saved.id) loadVideo(saved.id, saved.key, saved.time > 5 ? saved.time - 3 : null);
   else loadVideo(DEFAULT_VIDEO.id, DEFAULT_VIDEO.key);
+  // preview: plays the diagnostics locally, no room, nothing remembered
+  if (DEMO) { setStatus('Предпросмотр'); setTimeout(() => showDiag(myName), 5000); return; }
   start();
 };
 </script>
